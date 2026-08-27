@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    run: attacker
+  name: attacker
+spec:
+  containers:
+    - image: bitnami/kubectl:latest
+      name: attacker
+      command:
+        - "sleep"
+        - "infinity"
+      resources: {}
+  dnsPolicy: ClusterFirst
+  restartPolicy: Always
+status: {}
