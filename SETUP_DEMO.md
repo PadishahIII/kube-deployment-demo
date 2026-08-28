@@ -342,9 +342,14 @@ docker buildx imagetools inspect docker.io/padishahiii/kube-sec-analytics:1.0.0 
 
 Build `kube-security-ci`. Expected: **green**, with the stages
 
-`tool setup → policy unit tests (28/28) → policy conformance (28 pass) →
-IaC scan (trivy config, clean) → policy schema lint (13) → policy install
-(kubectl apply + wait for 13/13 Ready)`. The install stage is the only path
+`tool setup → policy unit tests (28/28) → policy conformance (chart-rendered,
+28 pass) → IaC scan (trivy config, clean) → policy schema lint (13) → policy
+install (kubectl apply + wait for 13/13 Ready)`. The install stage is the only
+path by which policies enter the cluster — it runs only after every gate passes.
+
+> The conformance stage renders the webapp chart per tenant (helm template +
+> `kubectl create --dry-run=client` namespace stamp) and applies the policies to
+> the result — no hand-written app fixtures to drift out of sync with the chart.
 by which policies enter the cluster — it runs only after every gate passes.
 
 Artifacts: `reports/kyverno-test.txt`, `reports/kyverno-conformance.txt`,
@@ -475,6 +480,9 @@ RoleBindings in `resources/cluster/rbac.yaml` match on them.
   `!has(object.spec) || (...)` guard (Kyverno's webhook is registered for
   DELETE too). The policies in this repo carry the guard — don't strip it
   when forking. See DESIGN.md §10.1.
-- **`kyverno apply` shows `pass: 0, fail: 0`** — you forgot `-f
-  tests/conformance/values.yaml`; without the namespace labels the
-  `namespaceSelector` rules are silently *Excluded* (a vacuous green).
+- **`kyverno apply` shows `pass: 0, fail: 0`** — two known causes: you forgot `-f
+  tests/conformance/values.yaml` (namespaceSelector labels not injected), or the
+  rendered app resources carry no `metadata.namespace` — `helm template` does not
+  stamp one, and namespaceSelector rules silently Exclude without it. The CI
+  stage handles both (values file + `kubectl create --dry-run=client -n <ns>`);
+  if you hand-roll the render, keep both steps.

@@ -525,9 +525,10 @@ Cleanup, Timestamper, Git.
 
 ```
 cleanup → checkout
-  → tool setup         : bootstrap version-pinned kyverno binary into .tools/ (no official CLI docker image)
+  → tool setup         : bootstrap version-pinned kyverno + helm binaries into .tools/ (no official CLI docker image)
   → policy unit tests  : .tools/kyverno test tests/policies
-  → policy conformance : .tools/kyverno apply policies/ -r tests/conformance/ -f tests/conformance/values.yaml
+  → policy conformance : helm template webapp per tenant | kubectl create --dry-run=client (namespace stamp)
+                         → .tools/kyverno apply policies/ -r <rendered>/ -f tests/conformance/values.yaml
   → IaC scan           : docker run aquasec/trivy:<ver> config --severity CRITICAL,HIGH --exit-code 1 --skip-dirs admission resources/
   → policy schema lint : kubectl apply --dry-run=server -f policies/   (kind-kubeconfig; CRD strict-decode)
   → policy install     : kubectl apply -f policies/            (kind-kubeconfig credential)
@@ -560,10 +561,15 @@ policies enter the cluster:
     gate: proves each rule's *behaviour* both directions (compliant passes, violating
     denied) and is the CEL compile-error net. The attacker pod is a `result: fail`
     fixture here (an *expected* denial).
-  - `kyverno apply policies/ -r tests/conformance/ -f values.yaml` — **conformance**
+  - `kyverno apply policies/ -r <rendered>/ -f values.yaml` — **conformance**
     (the official dry-run). Proves the *actual* app resources pass all 13; exit 0.
-    Pointed at real app manifests (not the synthetic test fixtures), so it catches
-    drift in the app's security context.
+    The app manifests are **rendered from the webapp chart at CI time** (helm
+    template → `kubectl create --dry-run=client` namespace stamp), not stored as
+    hand-written fixtures — the chart is the single source of truth CD deploys, so
+    a security-context change to the chart flips conformance in the same commit
+    instead of drifting in a stale copy under tests/. Deployments are autogen-
+    expanded to Pods, mirroring the real admission path; per-tenant renders land in
+    `reports/conformance-rendered/` (gitignored).
   - Without `-f values.yaml` (or `kyverno test`'s `variables:`), `namespaceSelector`
     rules are silently *Excluded* offline → `pass: 0, fail: 0` (a vacuous green).
     Verified: with `-f`, the compliant app pod passes all 14 rules; the attacker pod

@@ -19,6 +19,7 @@ pipeline {
     environment {
         KYVERNO_VERSION = "1.19.0"
         TRIVY_VERSION   = "0.74.0"
+        HELM_VERSION    = "3.16.4"
     }
 
     options {
@@ -69,6 +70,28 @@ pipeline {
                     fi
                     chmod +x .tools/kyverno
                     .tools/kyverno version
+
+                    # Helm: renders the webapp chart for the conformance stage (the app
+                    # manifests it produces are the same source of truth CD deploys).
+                    # No version reuse shortcut — a pinned binary is a ~25MB download.
+                    if [ -x ".tools/helm" ] && .tools/helm version --short 2>/dev/null | grep -q "v${HELM_VERSION}"; then
+                        echo "helm ${HELM_VERSION} already in .tools/"
+                    else
+                        OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+                        ARCH=$(uname -m)
+                        case "$ARCH" in
+                            x86_64)        ARCH="amd64";;
+                            arm64|aarch64) ARCH="arm64";;
+                            *) echo "unsupported arch: $ARCH"; exit 1;;
+                        esac
+                        URL="https://get.helm.sh/helm-v${HELM_VERSION}-${OS}-${ARCH}.tar.gz"
+                        echo "downloading ${URL}"
+                        curl -sSL "${URL}" -o .tools/helm.tar.gz
+                        tar -xzf .tools/helm.tar.gz -C .tools --strip-components=1 ${OS}-${ARCH}/helm
+                        rm -f .tools/helm.tar.gz
+                    fi
+                    chmod +x .tools/helm
+                    .tools/helm version --short
                 '''
             }
         }
@@ -87,18 +110,36 @@ pipeline {
 
         stage('policy conformance') {
             steps {
-                // Conformance (the official dry-run): the ACTUAL app resources must pass all
-                // policies. -f values.yaml injects the namespaceSelector labels, otherwise the
-                // label-scoped rules are silently Excluded and this vacuously passes (0/0).
+                // Conformance (the official dry-run): the ACTUAL app must pass all policies.
+                // The app manifests are NOT hand-maintained fixtures — they are rendered
+                // from the webapp chart (the same source of truth CD deploys), so a security-
+                // context change to the chart flips conformance in the same commit instead of
+                // drifting into a stale second copy under tests/.
+                // `helm template` does not stamp metadata.namespace, and namespaceSelector-
+                // scoped policies silently Exclude without it (vacuous 0/0 green) — hence
+                // `kubectl create --dry-run=client` to stamp tenant-a/tenant-b on the way in.
+                // Deployments are autogen-expanded to Pods, mirroring the real admission path.
+                // -f values.yaml injects the namespaceSelector labels for the same reason.
                 sh '''
                     set -o pipefail
-                    .tools/kyverno apply policies/ -r tests/conformance/ -f tests/conformance/values.yaml 2>&1 | tee reports/kyverno-conformance.txt
+                    mkdir -p reports/conformance-rendered
+                    render() {  # $1=release  $2=tenant  $3=image(fullRef, digest-pinned)
+                        .tools/helm template "$1" resources/helm/webapp/ \
+                            -f "resources/helm/webapp/values-${2}.yaml" \
+                            --set image.fullRef="$3" \
+                            --set annotations.imageVerified=cosign \
+                            --set annotations.imageDigest="${3##*@}" \
+                          | kubectl create --dry-run=client -n "$2" -o yaml -f - \
+                          > "reports/conformance-rendered/${1}.yaml"
+                    }
+                    render shop tenant-a "docker.io/padishahiii/kube-sec-shop@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                    render analytics tenant-b "docker.io/padishahiii/kube-sec-analytics@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+                    .tools/kyverno apply policies/ -r reports/conformance-rendered/ -f tests/conformance/values.yaml 2>&1 | tee reports/kyverno-conformance.txt
                 '''
             }
         }
 
         stage('IaC scan') {
-            steps {
                 // The trivy image entrypoint is already `trivy`, so the subcommand is `config`
                 // (NOT `trivy config`). --skip-dirs admission: the attacker pod is an intentional
                 // rejection target, not a deployable resource, so it is out of scan scope.
