@@ -1,0 +1,21 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: require-selinux-options-test
+policies:
+- ../../../policies/require-selinux-options.yaml
+resources:
+- pod-compliant.yaml
+- pod-violating.yaml
+variables: values.yaml
+results:
+- policy: require-selinux-options
+  rule: check-selinux-level
+  kind: Pod
+  resources: [compliant]
+  result: pass
+- policy: require-selinux-options
+  rule: check-selinux-level
+  kind: Pod
+  resources: [violating]
+  result: fail

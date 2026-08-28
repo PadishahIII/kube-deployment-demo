@@ -1,0 +1,114 @@
+# Dex OIDC provider in the platform namespace.
+# The kind apiserver is configured (see kind/cluster-config.yaml) with:
+#   --oidc-issuer-url=http://dex.platform.svc:5556
+#   --oidc-client-id=kubernetes
+#   --oidc-username-claim=email
+#   --oidc-groups-claim=groups
+# Demo users: alice@example.com / "alice", bob@example.com / "bob".
+#
+# Hardened: the config (which contains password hashes + the client secret) is a
+# Secret, not a ConfigMap; the pod runs non-root with a read-only rootfs and all
+# capabilities dropped. (It lives in the platform namespace, so the tenant
+# Kyverno policies do not apply to it — this is defence-in-depth.)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dex-config
+  namespace: platform
+type: Opaque
+stringData:
+  config.yaml: |
+    issuer: http://dex.platform.svc:5556
+    storage:
+      type: memory
+      config:
+        name: dex
+    web:
+      http: 0.0.0.0:5556
+    staticClients:
+    - id: kubernetes
+      redirectURIs:
+      - 'http://127.0.0.1:8080/callback'
+      - 'http://dex.platform.svc:5556/callback'
+      name: kubernetes
+      secret: kubernetes-secret
+    oauth2:
+      responseTypes: [code, id_token, token]
+    enablePasswordDB: true
+    passwordHash:
+      algorithm: pbkdf2
+      iterations: 1
+    users:
+    - email: alice@example.com
+      username: alice
+      password: $2a$05$NBrgWlytzR1pJf6QyFr1ye2QW2xAJ96KZISSeQD08OQjErjC2GdAa
+      name: Alice
+      groups: [tenant-a]
+    - email: bob@example.com
+      username: bob
+      password: $2a$05$B7dZ00uBIXNrktkOENC5VudzdtMBRAML9DvSTLGmkteCjtXCHsvxK
+      name: Bob
+      groups: [tenant-b]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dex
+  namespace: platform
+  labels:
+    app: dex
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dex
+  template:
+    metadata:
+      labels:
+        app: dex
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+      - name: dex
+        image: dexidp/dex:v2.41.1
+        args: ["-config", "/etc/dex/config.yaml"]
+        ports:
+        - containerPort: 5556
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          privileged: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: config
+          mountPath: /etc/dex
+          readOnly: true
+      volumes:
+      - name: config
+        secret:
+          secretName: dex-config
+---
+# Cluster-internal Service so the apiserver (and port-forward for the demo)
+# can reach dex at a stable name. Plain HTTP in-cluster for the lab; a
+# production cluster would terminate TLS in front of it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dex
+  namespace: platform
+  labels:
+    app: dex
+spec:
+  selector:
+    app: dex
+  ports:
+  - name: http
+    port: 5556
+    targetPort: 5556

@@ -1,0 +1,21 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: disallow-privileged-containers-test
+policies:
+- ../../../policies/disallow-privileged-containers.yaml
+resources:
+- pod-compliant.yaml
+- pod-violating.yaml
+variables: values.yaml
+results:
+- policy: disallow-privileged-containers
+  rule: check-no-privileged
+  kind: Pod
+  resources: [compliant]
+  result: pass
+- policy: disallow-privileged-containers
+  rule: check-no-privileged
+  kind: Pod
+  resources: [violating]
+  result: fail

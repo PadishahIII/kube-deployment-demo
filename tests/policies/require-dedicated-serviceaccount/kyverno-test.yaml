@@ -1,0 +1,21 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: require-dedicated-serviceaccount-test
+policies:
+- ../../../policies/require-dedicated-serviceaccount.yaml
+resources:
+- pod-compliant.yaml
+- pod-violating.yaml
+variables: values.yaml
+results:
+- policy: require-dedicated-serviceaccount
+  rule: check-dedicated-sa
+  kind: Pod
+  resources: [compliant]
+  result: pass
+- policy: require-dedicated-serviceaccount
+  rule: check-dedicated-sa
+  kind: Pod
+  resources: [violating]
+  result: fail

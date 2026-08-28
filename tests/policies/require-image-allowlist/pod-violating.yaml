@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: violating
+  namespace: tenant-a
+  annotations:
+    security.devsecops.io/image-verified: "cosign"
+    security.devsecops.io/image-digest: "sha256:aaaa"
+spec:
+  serviceAccountName: app-sa
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+  containers:
+  - name: app
+    image: bitnami/kubectl@sha256:aaaa
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      privileged: false
+      procMount: Default
+      capabilities:
+        drop: [ALL]
+      seLinuxOptions:
+        level: s0:c123,c456

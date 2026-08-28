@@ -1,0 +1,41 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "webapp.fullname" . }}-egress
+  labels:
+    {{- include "webapp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ include "webapp.name" . }}
+  policyTypes:
+  - Egress
+  egress:
+  # DNS is always allowed so the pod can resolve in-cluster service names.
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  {{- if .Values.networkPolicy.egressTo }}
+  {{- range .Values.networkPolicy.egressTo }}
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ .namespace }}
+      {{- if .app }}
+      podSelector:
+        matchLabels:
+          app: {{ .app }}
+      {{- end }}
+    ports:
+    - protocol: TCP
+      port: {{ .port }}
+  {{- end }}
+  {{- end }}
+{{- end }}

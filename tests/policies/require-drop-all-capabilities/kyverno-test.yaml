@@ -1,0 +1,21 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: require-drop-all-capabilities-test
+policies:
+- ../../../policies/require-drop-all-capabilities.yaml
+resources:
+- pod-compliant.yaml
+- pod-violating.yaml
+variables: values.yaml
+results:
+- policy: require-drop-all-capabilities
+  rule: check-drop-all
+  kind: Pod
+  resources: [compliant]
+  result: pass
+- policy: require-drop-all-capabilities
+  rule: check-drop-all
+  kind: Pod
+  resources: [violating]
+  result: fail

@@ -1,0 +1,32 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: require-image-attestation-test
+policies:
+- ../../../policies/require-image-attestation.yaml
+resources:
+- pod-compliant.yaml
+- pod-no-annotation.yaml
+- pod-wrong-digest.yaml
+variables: values.yaml
+results:
+- policy: require-image-attestation
+  rule: check-attestation-annotation
+  kind: Pod
+  resources: [compliant]
+  result: pass
+- policy: require-image-attestation
+  rule: check-attestation-annotation
+  kind: Pod
+  resources: [noannotation]
+  result: fail
+- policy: require-image-attestation
+  rule: check-attested-digest-matches
+  kind: Pod
+  resources: [compliant]
+  result: pass
+- policy: require-image-attestation
+  rule: check-attested-digest-matches
+  kind: Pod
+  resources: [wrongdigest]
+  result: fail

@@ -1,18 +1,18 @@
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
-  name: disallow-privileged-containers
+  name: disallow-host-namespaces
   annotations:
-    policies.kyverno.io/title: Disallow privileged containers
+    policies.kyverno.io/title: Disallow host namespaces
     policies.kyverno.io/category: Pod Security
     policies.kyverno.io/severity: high
     policies.kyverno.io/description: >-
-      Containers must not run in privileged mode.
+      Pods must not share host network/PID/IPC namespaces.
 spec:
   validationFailureAction: Enforce
   background: true
   rules:
-  - name: check-no-privileged
+  - name: check-no-host-ns
     match:
       any:
       - resources:
@@ -21,13 +21,12 @@ spec:
             matchLabels:
               tenancy.io/tenant: "true"
     validate:
-      message: "Containers must not set securityContext.privileged=true."
+      message: "Pods must not set hostNetwork, hostPID, or hostIPC to true."
       cel:
         expressions:
         - expression: >
             !has(object.spec) || (
-              object.spec.containers.all(c,
-                !has(c.securityContext)
-                || !has(c.securityContext.privileged)
-                || c.securityContext.privileged == false)
+              (!has(object.spec.hostNetwork) || object.spec.hostNetwork == false)
+              && (!has(object.spec.hostPID) || object.spec.hostPID == false)
+              && (!has(object.spec.hostIPC) || object.spec.hostIPC == false)
             )

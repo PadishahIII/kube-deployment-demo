@@ -1,0 +1,31 @@
+# pod.attacker.yaml — the rogue pod for the LIVE rejection demo.
+#
+# This is NOT part of the automated pipeline (policy behaviour is proven offline
+# by `kyverno test`). It is applied MANUALLY during the demo to show a real
+# admission denial:
+#
+#   kubectl apply -f resources/admission/pod.attacker.yaml -n tenant-a
+#
+# Expected: DENIED by the Kyverno webhook, listing every violated policy
+# (image not in trust list, no digest, no attestation, runs as root, no
+# allowPrivilegeEscalation=false, no read-only rootfs, no dropped caps, no
+# seLinuxOptions, default ServiceAccount, auto-mounted SA token, ...).
+#
+# Note: no namespace is set here — it is supplied with `-n tenant-a` at apply
+# time, so the namespaceSelector-scoped policies match it.
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    run: attacker
+  name: attacker
+spec:
+  containers:
+    - image: bitnami/kubectl:latest
+      name: attacker
+      command:
+        - "sleep"
+        - "infinity"
+      resources: {}
+  dnsPolicy: ClusterFirst
+  restartPolicy: Always

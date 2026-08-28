@@ -1,18 +1,18 @@
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
-  name: disallow-privileged-containers
+  name: require-drop-all-capabilities
   annotations:
-    policies.kyverno.io/title: Disallow privileged containers
+    policies.kyverno.io/title: Require dropping ALL capabilities
     policies.kyverno.io/category: Pod Security
     policies.kyverno.io/severity: high
     policies.kyverno.io/description: >-
-      Containers must not run in privileged mode.
+      Every container must drop ALL Linux capabilities.
 spec:
   validationFailureAction: Enforce
   background: true
   rules:
-  - name: check-no-privileged
+  - name: check-drop-all
     match:
       any:
       - resources:
@@ -21,13 +21,13 @@ spec:
             matchLabels:
               tenancy.io/tenant: "true"
     validate:
-      message: "Containers must not set securityContext.privileged=true."
+      message: "Every container must set securityContext.capabilities.drop to include ALL."
       cel:
         expressions:
         - expression: >
             !has(object.spec) || (
               object.spec.containers.all(c,
-                !has(c.securityContext)
-                || !has(c.securityContext.privileged)
-                || c.securityContext.privileged == false)
+                has(c.securityContext)
+                && has(c.securityContext.capabilities)
+                && c.securityContext.capabilities.drop.exists(x, x == "ALL"))
             )

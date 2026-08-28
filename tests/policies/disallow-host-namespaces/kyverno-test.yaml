@@ -1,0 +1,21 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: disallow-host-namespaces-test
+policies:
+- ../../../policies/disallow-host-namespaces.yaml
+resources:
+- pod-compliant.yaml
+- pod-violating.yaml
+variables: values.yaml
+results:
+- policy: disallow-host-namespaces
+  rule: check-no-host-ns
+  kind: Pod
+  resources: [compliant]
+  result: pass
+- policy: disallow-host-namespaces
+  rule: check-no-host-ns
+  kind: Pod
+  resources: [violating]
+  result: fail

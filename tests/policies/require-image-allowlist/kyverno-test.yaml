@@ -1,0 +1,21 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: require-image-allowlist-test
+policies:
+- ../../../policies/require-image-allowlist.yaml
+resources:
+- pod-compliant.yaml
+- pod-violating.yaml
+variables: values.yaml
+results:
+- policy: require-image-allowlist
+  rule: check-image-in-trust-list
+  kind: Pod
+  resources: [compliant]
+  result: pass
+- policy: require-image-allowlist
+  rule: check-image-in-trust-list
+  kind: Pod
+  resources: [violating]
+  result: fail

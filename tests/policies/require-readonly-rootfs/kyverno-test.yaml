@@ -1,0 +1,21 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: require-readonly-rootfs-test
+policies:
+- ../../../policies/require-readonly-rootfs.yaml
+resources:
+- pod-compliant.yaml
+- pod-violating.yaml
+variables: values.yaml
+results:
+- policy: require-readonly-rootfs
+  rule: check-readonly-rootfs
+  kind: Pod
+  resources: [compliant]
+  result: pass
+- policy: require-readonly-rootfs
+  rule: check-readonly-rootfs
+  kind: Pod
+  resources: [violating]
+  result: fail

@@ -1,0 +1,28 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-non-root
+  annotations:
+    policies.kyverno.io/title: Require non-root
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Application processes must not run as root; pods must set runAsNonRoot=true.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+  - name: check-run-as-non-root
+    match:
+      any:
+      - resources:
+          kinds: [Pod]
+          namespaceSelector:
+            matchLabels:
+              tenancy.io/tenant: "true"
+    validate:
+      message: "Pods must set spec.securityContext.runAsNonRoot=true (no root processes)."
+      pattern:
+        spec:
+          securityContext:
+            runAsNonRoot: true

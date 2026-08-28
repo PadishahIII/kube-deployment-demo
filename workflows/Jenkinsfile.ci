@@ -1,0 +1,152 @@
+// kube-security CI — validate the Kyverno policy set, then install it to the cluster.
+//
+// No gate framework (unlike the sibling repo): each tool's exit code IS the gate.
+//   .tools/kyverno test ...        non-zero  -> build fails (assertions + CEL compile net)
+//   .tools/kyverno apply -r ...    non-zero  -> build fails (conformance: real app must pass)
+//   trivy config --exit-code 1     non-zero  -> build fails on CRITICAL/HIGH findings
+//
+// Tooling:
+//   kyverno  -> bootstrapped (version-pinned) in "tool setup"; no official CLI docker image exists
+//   trivy    -> docker image; its entrypoint is already `trivy`, so the subcommand is `config`
+//   kubectl  -> agent-local, talks to the kind cluster via the `kind-kubeconfig` credential
+//
+// Order: offline checks first (they run without a cluster and catch most issues),
+// then the cluster checks (schema lint -> install -> ready). The install is the only
+// path by which policies enter the cluster, and it runs only after every check passes.
+pipeline {
+    agent any
+
+    environment {
+        KYVERNO_VERSION = "1.19.0"
+        TRIVY_VERSION   = "0.74.0"
+    }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        timeout(time: 25, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '10', daysToKeepStr: '30'))
+    }
+
+    stages {
+        stage('cleanup') {
+            steps {
+                cleanWs() // Workspace Cleanup Plugin
+            }
+        }
+
+        stage('checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('tool setup') {
+            steps {
+                sh '''
+                    set -e
+                    mkdir -p .tools reports
+                    # Reuse a matching local kyverno (avoids a ~52MB download); otherwise
+                    # download the version-pinned binary for this platform.
+                    if [ -x ".tools/kyverno" ] && .tools/kyverno version 2>/dev/null | grep -q "Version: ${KYVERNO_VERSION}"; then
+                        echo "kyverno ${KYVERNO_VERSION} already in .tools/"
+                    elif command -v kyverno >/dev/null 2>&1 && kyverno version 2>/dev/null | grep -q "Version: ${KYVERNO_VERSION}"; then
+                        cp "$(command -v kyverno)" .tools/kyverno
+                        echo "copied local kyverno ${KYVERNO_VERSION} to .tools/"
+                    else
+                        OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+                        ARCH=$(uname -m)
+                        case "$ARCH" in
+                            x86_64)        ARCH="x86_64";;
+                            arm64|aarch64) ARCH="arm64";;
+                            *) echo "unsupported arch: $ARCH"; exit 1;;
+                        esac
+                        URL="https://github.com/kyverno/kyverno/releases/download/v${KYVERNO_VERSION}/kyverno-cli_v${KYVERNO_VERSION}_${OS}_${ARCH}.tar.gz"
+                        echo "downloading ${URL}"
+                        curl -sSL "${URL}" -o .tools/kyverno.tar.gz
+                        tar -xzf .tools/kyverno.tar.gz -C .tools
+                        rm -f .tools/kyverno.tar.gz
+                    fi
+                    chmod +x .tools/kyverno
+                    .tools/kyverno version
+                '''
+            }
+        }
+
+        stage('policy unit tests') {
+            steps {
+                // Assertions: each rule's behaviour both directions (compliant passes,
+                // violating denied). Also the CEL compile-error net — a broken expression
+                // flips a `pass` fixture to `fail` before anything reaches the cluster.
+                sh '''
+                    set -o pipefail
+                    .tools/kyverno test tests/policies 2>&1 | tee reports/kyverno-test.txt
+                '''
+            }
+        }
+
+        stage('policy conformance') {
+            steps {
+                // Conformance (the official dry-run): the ACTUAL app resources must pass all
+                // policies. -f values.yaml injects the namespaceSelector labels, otherwise the
+                // label-scoped rules are silently Excluded and this vacuously passes (0/0).
+                sh '''
+                    set -o pipefail
+                    .tools/kyverno apply policies/ -r tests/conformance/ -f tests/conformance/values.yaml 2>&1 | tee reports/kyverno-conformance.txt
+                '''
+            }
+        }
+
+        stage('IaC scan') {
+            steps {
+                // The trivy image entrypoint is already `trivy`, so the subcommand is `config`
+                // (NOT `trivy config`). --skip-dirs admission: the attacker pod is an intentional
+                // rejection target, not a deployable resource, so it is out of scan scope.
+                sh '''
+                    set -o pipefail
+                    docker run --rm -v "$WORKSPACE:/wd" -w /wd \
+                        aquasec/trivy:${TRIVY_VERSION} \
+                        config --severity CRITICAL,HIGH --exit-code 1 --skip-dirs admission resources/ 2>&1 | tee reports/trivy-config.txt
+                '''
+            }
+        }
+
+        stage('policy schema lint') {
+            steps {
+                // Runs the real CRD structural schema (catches unknown fields / bad shapes)
+                // without creating anything. Does NOT compile CEL — that is the unit-test stage.
+                withCredentials([file(credentialsId: 'kind-kubeconfig', variable: 'KUBECONFIG_FILE')]) {
+                    sh '''
+                        export KUBECONFIG="$KUBECONFIG_FILE"
+                        kubectl apply --dry-run=server -f policies/
+                    '''
+                }
+            }
+        }
+
+        stage('policy install') {
+            steps {
+                // The only path by which policies enter the cluster. Reaching here means lint,
+                // unit tests, conformance, and the IaC scan all passed.
+                withCredentials([file(credentialsId: 'kind-kubeconfig', variable: 'KUBECONFIG_FILE')]) {
+                    sh '''
+                        export KUBECONFIG="$KUBECONFIG_FILE"
+                        kubectl apply -f policies/
+                        # Wait until every policy is accepted and compiled into Kyverno's cache.
+                        kubectl wait --for=condition=Ready clusterpolicy --all --timeout=120s
+                        kubectl get clusterpolicy
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'reports/kyverno-test.txt, reports/kyverno-conformance.txt, reports/trivy-config.txt',
+                             allowEmptyArchive: true
+        }
+        success { echo 'CI green: policies tested, conformed, scanned, and installed to the cluster.' }
+        failure { echo 'CI failed: see the failing stage.' }
+    }
+}

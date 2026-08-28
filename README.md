@@ -46,17 +46,16 @@ kube-security/
 │   ├── helm/
 │   │   └── webapp/              # the Helm chart used by CD (GPG-signed at deploy time)
 │   └── admission/
-│       └── pod.attacker.yaml    # rogue pod — the demo's rejection target
+│       └── pod.attacker.yaml    # rogue pod — manual demo rejection target
 ├── demo-apps/                   # demo app source — for PRODUCING the signed images
 │   ├── shop/                    # tenant-a: nodejs distroless web server :8080 + PVC (logs)
 │   └── analytics/               # tenant-b: nodejs API :9090 + PVC (report data)
 ├── tests/
 │   ├── policies/<policy>/       # kyverno test files: ≥1 pass + ≥1 fail fixture per policy
-│   ├── admission/               # in-cluster negative manifests
 │   └── verify.sh                # end-to-end cluster verification (RBAC matrix, kubelet, netpol)
 ├── workflows/
-│   ├── Jenkinsfile.ci           # policy lint + policy unit tests + trivy IaC scan (exit-code gates)
-│   └── Jenkinsfile.cd           # cosign verify → GPG-signed chart deploy → verify → negative test
+│   ├── Jenkinsfile.ci           # policy lint + unit tests + trivy IaC scan → installs the policies
+│   └── Jenkinsfile.cd           # cosign verify → GPG-signed chart deploy → verify
 └── tools/
     └── generate-helm-signing-key.sh
 ```
@@ -99,7 +98,10 @@ a new app (or a new tenant):
 All policies are Kyverno `ClusterPolicy` resources with `validationFailureAction:
 Enforce`, scoped to namespaces labeled `tenancy.io/tenant: "true"` (tenant tier —
 platform namespaces like `kyverno`/`platform` are governed separately). Every policy
-has offline unit tests (`kyverno test tests/policies`) that run in CI.
+has offline unit tests (`kyverno test tests/policies`) that run in CI, and **CI is the
+policy execution stage**: only policies that lint clean and pass their tests get
+`kubectl apply`-ed to the cluster (DESIGN.md §10.1). Denials are asserted offline by
+`kyverno test` — not re-derived by applying violating pods in-cluster.
 
 | Policy file | Security consideration |
 | --- | --- |
@@ -139,8 +141,11 @@ has offline unit tests (`kyverno test tests/policies`) that run in CI.
   the application repo's job.
 - Helm chart is GPG-signed and verified (committed public key only) before deploy —
   provenance for the deploy artifact.
-- Negative admission test in CD: the attacker pod *must* be rejected, and a
-  "successful" apply fails the build.
+- **Policy execution stage (CI):** after lint + unit tests + IaC scan pass, CI applies
+  `policies/` to the cluster and waits for `policyready` — so a policy can never be
+  enforced before it was tested, and a deployment can't race webhook registration.
+- Rejection paths are proven **offline** (`kyverno test`, one dir per policy) and shown
+  **live** in the manual demo — the CD job stays deploy-only with no negative tests.
 
 ## What's included
 
@@ -149,14 +154,14 @@ has offline unit tests (`kyverno test tests/policies`) that run in CI.
   default-deny NetworkPolicies with explicit cross-tenant allow
 - Demo apps: nodejs **distroless** web servers with PVCs (shop, analytics) + a rogue
   attacker pod
-- Jenkins **CI**: policy lint, `kyverno test`, Trivy IaC/config scan — hardcoded
-  exit-code gates
+- Jenkins **CI**: policy lint, `kyverno test`, Trivy IaC/config scan, then the
+  **policy install stage** (`kubectl apply -f policies/` + `policyready` wait)
 - Jenkins **CD**: cosign verify (trust anchor) → GPG-signed Helm chart → deploy →
-  verification → negative admission test
+  in-cluster verification (rollout, PolicyReports, netpol, RBAC, kubelet)
 - Image trust anchor: **cosign signature verification** (committed public key,
   `cosign-pub` credential — same ID as the sibling repo)
 - Component hardening: external API auth (OIDC/dex), least-privilege RBAC, restricted
-  kubelet (verified with kube-bench + negative requests)
+  kubelet (verified with kube-bench + unauthenticated requests)
 
 ## What's not included
 

@@ -1,0 +1,21 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: disallow-privilege-escalation-test
+policies:
+- ../../../policies/disallow-privilege-escalation.yaml
+resources:
+- pod-compliant.yaml
+- pod-violating.yaml
+variables: values.yaml
+results:
+- policy: disallow-privilege-escalation
+  rule: check-no-priv-esc
+  kind: Pod
+  resources: [compliant]
+  result: pass
+- policy: disallow-privilege-escalation
+  rule: check-no-priv-esc
+  kind: Pod
+  resources: [violating]
+  result: fail

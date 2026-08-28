@@ -1,0 +1,43 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-image-allowlist
+  annotations:
+    policies.kyverno.io/title: Governed image allowlist
+    policies.kyverno.io/category: Supply Chain
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Only images from the governed trust list may run in tenant namespaces.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+  - name: check-image-in-trust-list
+    match:
+      any:
+      - resources:
+          kinds: [Pod]
+          namespaceSelector:
+            matchLabels:
+              tenancy.io/tenant: "true"
+    validate:
+      message: "Image is not in the governed image trust list. Only images built and scanned by the platform pipeline may be admitted."
+      cel:
+        variables:
+        - name: trustedRepos
+          # ── GOVERNED IMAGE TRUST LIST ────────────────────────────────
+          # Add a registry/org here (and in CI) when the platform starts
+          # building + scanning images from it. Versioned, reviewed, and
+          # unit-tested like code.
+          expression: '["docker.io/padishahiii"]'
+        expressions:
+        - expression: >
+            !has(object.spec) || (
+              variables.trustedRepos.exists(r,
+                object.spec.containers.all(c,
+                  (c.image.startsWith("docker.io/") ? c.image : "docker.io/" + c.image)
+                    .startsWith(r + "/")))
+            )
+          messageExpression: >-
+            "Image " + object.spec.containers.map(c, c.image).join(", ") +
+            " is not in the governed image trust list."

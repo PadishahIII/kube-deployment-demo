@@ -1,0 +1,27 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-automount-sa-token-false
+  annotations:
+    policies.kyverno.io/title: Require automountServiceAccountToken=false
+    policies.kyverno.io/category: Identity
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Pods must not auto-mount the ServiceAccount token.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+  - name: check-no-automount
+    match:
+      any:
+      - resources:
+          kinds: [Pod]
+          namespaceSelector:
+            matchLabels:
+              tenancy.io/tenant: "true"
+    validate:
+      message: "Pods must set spec.automountServiceAccountToken=false."
+      pattern:
+        spec:
+          automountServiceAccountToken: false

@@ -1,0 +1,21 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: require-non-root-test
+policies:
+- ../../../policies/require-non-root.yaml
+resources:
+- pod-compliant.yaml
+- pod-violating.yaml
+variables: values.yaml
+results:
+- policy: require-non-root
+  rule: check-run-as-non-root
+  kind: Pod
+  resources: [compliant]
+  result: pass
+- policy: require-non-root
+  rule: check-run-as-non-root
+  kind: Pod
+  resources: [violating]
+  result: fail

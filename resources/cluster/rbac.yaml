@@ -1,0 +1,58 @@
+# Least-privilege demo RBAC. With OIDC, the user's identity is their email
+# (dex username-claim=email), so RoleBinding subjects use the email.
+# alice → read workloads in tenant-a only; bob → read workloads in tenant-b only.
+# (App ServiceAccounts — shop-sa / analytics-sa — are created by the Helm chart
+#  with ZERO rules and automountServiceAccountToken=false.)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tenant-a-user
+  namespace: tenant-a
+rules:
+- apiGroups: [""]
+  resources: [pods, services, configmaps, persistentvolumeclaims]
+  verbs: [get, list, watch]
+- apiGroups: [apps]
+  resources: [deployments]
+  verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: alice-tenant-a
+  namespace: tenant-a
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: tenant-a-user
+subjects:
+- kind: User
+  name: alice@example.com
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tenant-b-user
+  namespace: tenant-b
+rules:
+- apiGroups: [""]
+  resources: [pods, services, configmaps, persistentvolumeclaims]
+  verbs: [get, list, watch]
+- apiGroups: [apps]
+  resources: [deployments]
+  verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bob-tenant-b
+  namespace: tenant-b
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: tenant-b-user
+subjects:
+- kind: User
+  name: bob@example.com
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "webapp.fullname" . }}
+  labels:
+    {{- include "webapp.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ include "webapp.name" . }}
+  template:
+    metadata:
+      labels:
+        {{- include "webapp.labels" . | nindent 8 }}
+      {{- if or .Values.annotations.imageVerified .Values.annotations.imageDigest }}
+      annotations:
+        {{- if .Values.annotations.imageVerified }}
+        security.devsecops.io/image-verified: {{ .Values.annotations.imageVerified | quote }}
+        {{- end }}
+        {{- if .Values.annotations.imageDigest }}
+        security.devsecops.io/image-digest: {{ .Values.annotations.imageDigest | quote }}
+        {{- end }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "webapp.fullname" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      securityContext:
+        runAsNonRoot: {{ .Values.securityContext.runAsNonRoot }}
+        runAsUser: {{ .Values.securityContext.runAsUser }}
+        fsGroup: {{ .Values.securityContext.fsGroup }}
+      containers:
+      - name: {{ include "webapp.name" . }}
+        image: {{ include "webapp.image" . }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - name: http
+          containerPort: {{ .Values.containerPort }}
+          protocol: TCP
+        securityContext:
+          runAsNonRoot: {{ .Values.containerSecurityContext.runAsNonRoot }}
+          allowPrivilegeEscalation: {{ .Values.containerSecurityContext.allowPrivilegeEscalation }}
+          readOnlyRootFilesystem: {{ .Values.containerSecurityContext.readOnlyRootFilesystem }}
+          privileged: {{ .Values.containerSecurityContext.privileged }}
+          procMount: {{ .Values.containerSecurityContext.procMount }}
+          capabilities:
+            drop:
+            {{- range .Values.containerSecurityContext.capabilities.drop }}
+            - {{ . }}
+            {{- end }}
+          seLinuxOptions:
+            level: {{ .Values.securityContext.seLinuxOptions.level }}
+        {{- if .Values.persistence.enabled }}
+        volumeMounts:
+        - name: logs
+          mountPath: /tmp
+        {{- end }}
+      {{- if .Values.persistence.enabled }}
+      volumes:
+      - name: logs
+        persistentVolumeClaim:
+          claimName: {{ include "webapp.fullname" . }}-logs
+      {{- end }}

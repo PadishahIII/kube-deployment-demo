@@ -1,0 +1,14 @@
+# shop — tenant-a, :8080. Can call analytics (tenant-b):9090; nothing may call it.
+nameOverride: shop
+image:
+  repository: docker.io/padishahiii/kube-sec-shop
+  tag: "1.0.0"
+service:
+  port: 8080
+containerPort: 8080
+networkPolicy:
+  egressTo:
+  - namespace: tenant-b
+    app: analytics
+    port: 9090
+  ingressFrom: []

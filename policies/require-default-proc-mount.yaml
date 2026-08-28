@@ -1,18 +1,18 @@
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
-  name: disallow-privileged-containers
+  name: require-default-proc-mount
   annotations:
-    policies.kyverno.io/title: Disallow privileged containers
+    policies.kyverno.io/title: Require default /proc mount
     policies.kyverno.io/category: Pod Security
-    policies.kyverno.io/severity: high
+    policies.kyverno.io/severity: medium
     policies.kyverno.io/description: >-
-      Containers must not run in privileged mode.
+      Containers must not use procMount=Unmasked.
 spec:
   validationFailureAction: Enforce
   background: true
   rules:
-  - name: check-no-privileged
+  - name: check-proc-mount
     match:
       any:
       - resources:
@@ -21,13 +21,13 @@ spec:
             matchLabels:
               tenancy.io/tenant: "true"
     validate:
-      message: "Containers must not set securityContext.privileged=true."
+      message: "Containers must not set securityContext.procMount=Unmasked (default masking required)."
       cel:
         expressions:
         - expression: >
             !has(object.spec) || (
               object.spec.containers.all(c,
                 !has(c.securityContext)
-                || !has(c.securityContext.privileged)
-                || c.securityContext.privileged == false)
+                || !has(c.securityContext.procMount)
+                || c.securityContext.procMount != "Unmasked")
             )

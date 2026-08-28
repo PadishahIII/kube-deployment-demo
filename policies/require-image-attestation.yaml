@@ -1,0 +1,48 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-image-attestation
+  annotations:
+    policies.kyverno.io/title: Require image attestation
+    policies.kyverno.io/category: Supply Chain
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Only cosign-verified images may run; the attested digest must match the image digest.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+  - name: check-attestation-annotation
+    match:
+      any:
+      - resources:
+          kinds: [Pod]
+          namespaceSelector:
+            matchLabels:
+              tenancy.io/tenant: "true"
+    validate:
+      message: "Pod is missing the image attestation (security.devsecops.io/image-verified=cosign). Only images verified by the CD pipeline may run."
+      pattern:
+        metadata:
+          annotations:
+            "security.devsecops.io/image-verified": "cosign"
+  - name: check-attested-digest-matches
+    match:
+      any:
+      - resources:
+          kinds: [Pod]
+          namespaceSelector:
+            matchLabels:
+              tenancy.io/tenant: "true"
+    validate:
+      message: "The attested image digest does not match the image digest. The image was likely re-tagged or replaced after verification — re-run the pipeline."
+      cel:
+        expressions:
+        - expression: >
+            !has(object.spec) || (
+              object.spec.containers.all(c,
+                c.image.contains("@sha256:")
+                && has(object.metadata.annotations)
+                && object.metadata.annotations["security.devsecops.io/image-digest"]
+                   == c.image.substring(c.image.indexOf("@") + 1))
+            )

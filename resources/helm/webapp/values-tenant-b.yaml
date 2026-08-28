@@ -1,0 +1,12 @@
+# analytics — tenant-b, :9090. Reachable from tenant-a (shop); no egress beyond DNS.
+nameOverride: analytics
+image:
+  repository: docker.io/padishahiii/kube-sec-analytics
+  tag: "1.0.0"
+service:
+  port: 9090
+containerPort: 9090
+networkPolicy:
+  ingressFrom:
+  - namespace: tenant-a
+  egressTo: []

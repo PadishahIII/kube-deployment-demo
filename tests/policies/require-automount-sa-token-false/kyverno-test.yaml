@@ -1,0 +1,21 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: require-automount-sa-token-false-test
+policies:
+- ../../../policies/require-automount-sa-token-false.yaml
+resources:
+- pod-compliant.yaml
+- pod-violating.yaml
+variables: values.yaml
+results:
+- policy: require-automount-sa-token-false
+  rule: check-no-automount
+  kind: Pod
+  resources: [compliant]
+  result: pass
+- policy: require-automount-sa-token-false
+  rule: check-no-automount
+  kind: Pod
+  resources: [violating]
+  result: fail

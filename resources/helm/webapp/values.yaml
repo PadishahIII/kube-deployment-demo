@@ -1,0 +1,59 @@
+replicaCount: 1
+# The single source of truth for the app name (resource names + `app` label).
+nameOverride: ""
+
+image:
+  repository: docker.io/padishahiii/kube-sec-shop
+  tag: "1.0.0"
+  # CD stamps a full digest-pinned reference here after cosign verify, e.g.
+  #   docker.io/padishahiii/kube-sec-shop@sha256:...
+  # When set, it overrides repository:tag.
+  fullRef: ""
+  pullPolicy: IfNotPresent
+
+# Attestation annotations, stamped by CD after `cosign verify` succeeds.
+# Left empty by default so a non-CD deploy is DENIED by require-image-attestation.
+annotations:
+  imageVerified: ""
+  imageDigest: ""
+
+serviceAccount:
+  automountServiceAccountToken: false
+
+service:
+  type: ClusterIP
+  port: 8080
+
+containerPort: 8080
+
+# Pod-level security context.
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+  seLinuxOptions:
+    level: s0:c123,c456
+
+# Container-level security context (satisfies the per-container policies).
+containerSecurityContext:
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  privileged: false
+  procMount: Default
+  capabilities:
+    drop:
+    - ALL
+
+persistence:
+  enabled: true
+  size: 1Gi
+  accessMode: ReadWriteOnce
+
+networkPolicy:
+  enabled: true
+  # Ingress allows: [{namespace: <ns>}] — default-deny when empty.
+  ingressFrom: []
+  # Egress allows: [{namespace: <ns>, app: <app>, port: <n>}] — DNS is always
+  # allowed; anything else is denied unless listed here.
+  egressTo: []

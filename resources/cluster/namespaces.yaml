@@ -1,0 +1,27 @@
+# Tenant namespaces. The `tenancy.io/tenant: "true"` label is the governance
+# boundary: every Kyverno ClusterPolicy is scoped to this label (see policies/).
+# A new tenant = create a namespace with this label — no policy edits required.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenant-a
+  labels:
+    tenancy.io/tenant: "true"
+    tenancy.io/name: shop
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenant-b
+  labels:
+    tenancy.io/tenant: "true"
+    tenancy.io/name: analytics
+---
+# Platform tier (OIDC / dex). Deliberately NOT labeled tenancy.io/tenant, so the
+# tenant policies do not apply to it — two-tier governance.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: platform
+  labels:
+    tenancy.io/platform: "true"

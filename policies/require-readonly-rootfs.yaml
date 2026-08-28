@@ -1,18 +1,18 @@
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
-  name: disallow-privileged-containers
+  name: require-readonly-rootfs
   annotations:
-    policies.kyverno.io/title: Disallow privileged containers
+    policies.kyverno.io/title: Require read-only root filesystem
     policies.kyverno.io/category: Pod Security
-    policies.kyverno.io/severity: high
+    policies.kyverno.io/severity: medium
     policies.kyverno.io/description: >-
-      Containers must not run in privileged mode.
+      Every container must set readOnlyRootFilesystem=true.
 spec:
   validationFailureAction: Enforce
   background: true
   rules:
-  - name: check-no-privileged
+  - name: check-readonly-rootfs
     match:
       any:
       - resources:
@@ -21,13 +21,13 @@ spec:
             matchLabels:
               tenancy.io/tenant: "true"
     validate:
-      message: "Containers must not set securityContext.privileged=true."
+      message: "Every container must set securityContext.readOnlyRootFilesystem=true."
       cel:
         expressions:
         - expression: >
             !has(object.spec) || (
               object.spec.containers.all(c,
-                !has(c.securityContext)
-                || !has(c.securityContext.privileged)
-                || c.securityContext.privileged == false)
+                has(c.securityContext)
+                && has(c.securityContext.readOnlyRootFilesystem)
+                && c.securityContext.readOnlyRootFilesystem == true)
             )

@@ -1,18 +1,18 @@
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
-  name: disallow-privilege-escalation
+  name: require-selinux-options
   annotations:
-    policies.kyverno.io/title: Disallow privilege escalation
+    policies.kyverno.io/title: Require SELinux options
     policies.kyverno.io/category: Pod Security
-    policies.kyverno.io/severity: high
+    policies.kyverno.io/severity: medium
     policies.kyverno.io/description: >-
-      Every container must set allowPrivilegeEscalation=false.
+      Every container must set a securityContext.seLinuxOptions.level.
 spec:
   validationFailureAction: Enforce
   background: true
   rules:
-  - name: check-no-priv-esc
+  - name: check-selinux-level
     match:
       any:
       - resources:
@@ -21,13 +21,14 @@ spec:
             matchLabels:
               tenancy.io/tenant: "true"
     validate:
-      message: "Every container must set securityContext.allowPrivilegeEscalation=false."
+      message: "Every container must set securityContext.seLinuxOptions.level (spec-level conformance; runtime enforcement needs an SELinux-enabled node)."
       cel:
         expressions:
         - expression: >
             !has(object.spec) || (
               object.spec.containers.all(c,
                 has(c.securityContext)
-                && has(c.securityContext.allowPrivilegeEscalation)
-                && c.securityContext.allowPrivilegeEscalation == false)
+                && has(c.securityContext.seLinuxOptions)
+                && has(c.securityContext.seLinuxOptions.level)
+                && c.securityContext.seLinuxOptions.level != "")
             )

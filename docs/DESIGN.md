@@ -37,48 +37,51 @@ usage.
 | Multi-tenant namespaces, RBAC, NetworkPolicies | PodSecurityAdmission labels (mentioned as alternative) |
 | External API authentication (OIDC via dex) | Node hardening beyond kind defaults (kube-bench used for evidence) |
 | Kubelet access restriction + verification | Secrets management (SOPS/SealedSecrets), GitOps (ArgoCD) |
-| Jenkins CI (policy tests, IaC scan) + CD (cosign verify → signed-chart deploy → verify) | Gate framework (sibling repo) — this repo hardcodes failure gates (tool exit codes) |
+| Jenkins CI (policy tests, IaC scan, **policy install**) + CD (cosign verify → signed-chart deploy → verify) | Gate framework (sibling repo) — this repo hardcodes failure gates (tool exit codes) |
 
 ## 3. Architecture
 
 ```
-  app repo pipeline (out of scope — SETUP_DEMO.md):
-  build → trivy image scan → cosign sign → push to docker.io/padishahiii/*
+   app repo pipeline (OUT OF SCOPE — see SETUP_DEMO.md):
+   build → trivy image scan (CRITICAL,HIGH) → cosign sign → push docker.io/padishahiii/*
 
-                    ┌──────────────────────────── Jenkins (local, :8081) ────────────────────────────┐
-                    │                                                                                │
-  git push          │  CI: workflows/Jenkinsfile.ci                  CD: workflows/Jenkinsfile.cd    │
-  ┌────────┐        │  ┌──────────────────────────────┐             ┌──────────────────────────────┐ │
-  │ GitHub │───────▶│  │ checkout                     │             │ cosign verify (trust anchor) │ │
-  │  repo  │        │  │ policy lint (kyverno CLI)    │             │ helm package + GPG sign      │ │
-  └────────┘        │  │ policy unit tests            │             │ helm upgrade --install ──────┼─┼────────┐
-                    │  │ trivy config (helm + yaml)   │             │ rollout + verify             │ │        │
-                    │  └──────────────────────────────┘             │ negative admission test      │ │        │
-                    │                                               └──────────────────────────────┘ │        │
-                    └────────────────────────────────────────────────────────────────────────────────┘        │
-   ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-   │  kind cluster (single node)                                                                              │
-   │  ┌─────────────────────────────────────────────────────────────────────────────────────────────────────┐ │
-   │  │ kube-apiserver:  --oidc-issuer-url=http://dex.platform.svc:5556  (external auth)  --authorization=Node,RBAC │
-   │  │ kubelet:         anonymous auth OFF, read-only port 0, webhook authorization                        │ │
-   │  │                                                                                                      │ │
-   │  │ Kyverno (kyverno ns) ── 13 ClusterPolicies, Enforce, scoped to namespaces labeled tenancy.io/tenant │ │
-   │  │                                                                                                      │ │
-   │  │  platform ns            tenant-a ns                tenant-b ns                                      │ │
-   │  │  ┌─────────────┐        ┌───────────────────┐      ┌───────────────────┐                            │ │
-   │  │  │ dex (OIDC)  │        │ shop (nodejs      │      │ analytics (nodejs │                            │ │
-   │  │  │ :5556       │        │  distroless, 8080)│      │  distroless, 9090)│                            │ │
-   │  │  └─────────────┘        │ PVC /data (logs)  │      │ PVC /data         │                            │ │
-   │  │                         │ SA: shop          │      │ SA: analytics     │                            │ │
-   │  │                         │ NetPol: deny-all  │      │ NetPol: deny-all  │                            │ │
-   │  │                         │  + allow-dns      │      │  + allow-dns      │                            │ │
-   │  │                         │  + allow-same-ns  │      │  + allow-from-a   │◀───────────────────────────┘ │
-   │  │                         └───────────────────┘      └───────────────────┘   (explicit cross-tenant    │
-   │  │                                                              ▲              ingress allow, 9090)      │
-   │  │                                                              │                                        │
-   │  │  rogue: resources/admission/pod.attacker.yaml ───────────────┴─ REJECTED by Kyverno (attacker pod)   │
-   │  └─────────────────────────────────────────────────────────────────────────────────────────────────────┘ │
-   └──────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+                    ┌─────────────────────────── Jenkins (local, :8081) ────────────────────────────┐
+                    │                                                                               │
+  git push          │  CI: workflows/Jenkinsfile.ci                CD: workflows/Jenkinsfile.cd     │
+  ┌────────┐        │  ┌─────────────────────────────┐            ┌─────────────────────────────┐   │
+  │ GitHub │──────▶ │  │ schema lint (dry-run=server)│            │ cosign verify (trust anchor)│   │
+  │  repo  │        │  │ policy unit tests           │            │ helm package + GPG sign     │   │
+  └────────┘        │  │ trivy config (helm + yaml)  │            │ helm verify (public.asc)    │   │
+                    │  │ POLICY INSTALL (kubectl     │            │ helm upgrade --install ─────┼───┼──┐
+                    │  │   apply + Ready wait)       │            │ rollout + verify            │   │  │
+                    │  └──────────────┬──────────────┘            └─────────────────────────────┘   │  │
+                    └─────────────────┼─────────────────────────────────────────────────────────────┘  │
+                                      │ policies that passed their tests                               │
+                                      │ are the only ones that reach the cluster                       │
+                                      ▼                                                                ▼
+   ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+   │  kind cluster (single node)                                                                      │
+   │                                                                                                  │
+   │  kube-apiserver : --oidc-issuer-url=http://dex.platform.svc:5556   --authorization-mode=Node,RBAC│
+   │  kubelet        : anonymous auth OFF · read-only port 0 · webhook authorization                  │
+   │                                                                                                  │
+   │  Kyverno (kyverno ns) ── 13 ClusterPolicies, Enforce, scoped to ns label tenancy.io/tenant      │
+   │        │                                                                                         │
+   │        └─ admission-validates every Pod created by ANY path (pipeline OR kubectl OR controller)  │
+   │                                                                                                  │
+   │   platform ns          tenant-a ns                 tenant-b ns                                   │
+   │   ┌───────────┐        ┌──────────────────┐        ┌──────────────────┐                          │
+   │   │ dex (OIDC)│        │ shop  :8080      │        │ analytics :9090  │                          │
+   │   │  :5556    │        │ PVC /data (logs) │        │ PVC /data        │                          │
+   │   └───────────┘        │ SA: shop         │        │ SA: analytics    │                          │
+   │                        │ NetPol deny-all  │        │ NetPol deny-all  │◀─── cross-tenant allow   │
+   │                        │  +allow-dns      │        │  +allow-dns      │     tenant-a → :9090     │
+   │                        │  +allow-same-ns  │        │  +allow-from-a   │                          │
+   │                        └──────────────────┘        └──────────────────┘                          │
+   │                                                                                                  │
+   │  rogue: resources/admission/pod.attacker.yaml (bitnami/kubectl, root, no ctx)                    │
+   │          └─▶ REJECTED at admission: image not in governed trust list (+ 8 other rules)           │
+   └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Control flow for a compliant deployment:**
@@ -88,18 +91,22 @@ usage.
    (`docker.io/padishahiii/*`). Out of scope for this repo — SETUP_DEMO.md walks
    through exactly this for the demo apps ("Producing the demo signed images").
 2. Developer pushes a change to this repo (policies, chart, values, manifests).
-3. CI lints the Kyverno policies, runs policy unit tests, and Trivy-scans the Helm
-   chart + manifests. Any non-zero exit fails the build (hardcoded gate).
-4. CD verifies the image signature with the committed cosign public key
+3. CI lints the Kyverno policies, runs the policy unit tests (`kyverno test`), and
+   Trivy-scans the Helm chart + manifests. Any non-zero exit fails the build.
+4. **CI installs the policies** — `kubectl apply -f policies/`. This is the policy
+   execution stage: only policies that linted clean and passed their unit tests reach
+   the cluster. (Violation paths are proven offline by `kyverno test`, so the
+   pipeline does not re-assert them in-cluster.)
+5. CD verifies the image signature with the committed cosign public key
    (`cosign-pub` credential) — the trust anchor. Unsigned or tampered image → no deploy.
-5. CD packages the chart, GPG-signs it, verifies the signature with the committed
+6. CD packages the chart, GPG-signs it, verifies the signature with the committed
    public key, and `helm upgrade --install`s it into the tenant namespace. The
    deployment carries the attestation annotations (verified-by + digest).
-6. **Kyverno validates every Pod at admission** — the annotations, image digest,
+7. **Kyverno validates every Pod at admission** — the annotations, image digest,
    and security contexts must satisfy all 13 policies or the Pod is rejected.
-7. Post-deploy verification: rollout status, PolicyReports, NetworkPolicy behavior,
-   RBAC `can-i` matrix, kubelet anonymous-access check, and a **negative test**
-   (apply the attacker pod, assert rejection).
+8. Post-deploy verification (in-cluster, positive only): rollout status, PolicyReports
+   for the deployed workloads, NetworkPolicy behavior, RBAC `can-i` matrix, kubelet
+   anonymous-access check.
 
 ## 4. Multi-tenant model
 
@@ -221,31 +228,42 @@ spec:
               tenancy.io/tenant: "true"
       validate:
         message: >-
-          Image {{request.object.spec.containers[0].image}} is not in the governed
-          image trust list. Only images built and scanned by the platform pipeline
-          may be admitted.
+          Image is not in the governed image trust list. Only images built and
+          scanned by the platform pipeline may be admitted.
         cel:
-          - expressions:
-              - expression: >
-                  document.spec.containers.all(c,
-                    trustedRepos.exists(r,
-                      (c.image.startsWith("docker.io/") ? c.image : "docker.io/" + c.image)
-                        .startsWith(r + "/")))
-  variables:
-    # ── GOVERNED IMAGE TRUST LIST ─────────────────────────────────────────
-    # Add a registry/org here (and in CI) when the platform starts building
-    # and scanning images from it. This is the "private trust list" — it is
-    # versioned, reviewed, and unit-tested like code.
-    - name: trustedRepos
-      value:
-        - "docker.io/padishahiii"
+          variables:
+          - name: trustedRepos
+            # ── GOVERNED IMAGE TRUST LIST ────────────────────────────────
+            # Add a registry/org here (and in CI) when the platform starts
+            # building + scanning images from it. This is the "private trust
+            # list" — versioned, reviewed, unit-tested like code.
+            expression: '["docker.io/padishahiii"]'
+          expressions:
+          - expression: >
+              variables.trustedRepos.exists(r,
+                object.spec.containers.all(c,
+                  (c.image.startsWith("docker.io/") ? c.image : "docker.io/" + c.image)
+                    .startsWith(r + "/")))
+            messageExpression: >-
+              "Image " + object.spec.containers.map(c, c.image).join(", ") +
+              " is not in the governed image trust list."
 ```
 
-> **Design note — trust list in the policy vs. ConfigMap.** A production org would
-> externalize the list to a ConfigMap read via `apiCall[jq]` (change without policy
-> redeploy). We keep it in the policy `variables` deliberately: `kyverno test` runs
-> fully offline, the list is reviewed/committed like code, and the demo stays
-> self-contained. The trade-off is documented in the README.
+> **Design note — trust list in the policy vs. ConfigMap.** In `kyverno.io/v1`,
+> CEL rules can only see `object`, `parameters`, and `variables` declared under
+> `validate.cel.variables` — they cannot read a ConfigMap (that is a JMESPath
+> `context` feature, invisible to CEL). So the trust list lives in the policy's
+> `cel.variables`: changing the list is a *policy change*, reviewed and committed
+> like code and unit-tested offline by `kyverno test`. A production org that must
+> change the list *without* a policy redeploy would migrate to the CEL-native
+> `policies.kyverno.io/v1` engine (ValidatingPolicy), where `spec.variables` can be
+> ConfigMap-backed.
+>
+> **Deprecation note:** Kyverno 1.19 warns that `kyverno.io/v1` ClusterPolicy is
+> deprecated in favour of `policies.kyverno.io/v1` (ValidatingPolicy /
+> ImageValidatingPolicy / ...). We stay on `kyverno.io/v1` deliberately: it is the
+> most widely documented form, it drives PolicyReports, and the `kyverno test` CLI
+> harness is mature against it. The migration is a known follow-on.
 
 ### 6.3 Example: `require-image-attestation.yaml` (full)
 
@@ -294,12 +312,12 @@ spec:
           The attested image digest does not match the image digest. The image was
           likely re-tagged or replaced after verification — re-run the pipeline.
         cel:
-          - expressions:
-              - expression: >
-                  document.spec.containers.all(c,
-                    c.image.contains("@sha256:")
-                    && document.metadata.annotations["security.devsecops.io/image-digest"]
-                       == c.image.substring(c.image.indexOf("@sha256:") + 7))
+          expressions:
+          - expression: >
+              object.spec.containers.all(c,
+                c.image.contains("@sha256:")
+                && object.metadata.annotations["security.devsecops.io/image-digest"]
+                   == c.image.substring(c.image.indexOf("@") + 1))
 ```
 ### 6.4 Remaining policies (summary)
 
@@ -498,26 +516,94 @@ and `workflows/Jenkinsfile.cd`. (Multibranch + GitHub App is the sibling project
 setup and works here too, but is not required.)
 
 **Credentials:** `dockerhub` (Username/Password), `cosign-pub` (Secret file — same
-credential ID as the sibling repo), `kind-kubeconfig` (Secret file),
-`helm-signing-key` (Secret file). **Plugins:** Pipeline Aggregator, Docker Pipeline,
-Credentials Binding, Workspace Cleanup, Timestamper, Git.
+credential ID as the sibling repo), `kind-kubeconfig` (Secret file — used by CI's
+policy install stage and by CD for deploys), `helm-signing-key` (Secret file).
+**Plugins:** Pipeline Aggregator, Docker Pipeline, Credentials Binding, Workspace
+Cleanup, Timestamper, Git.
 
 ### 10.1 CI — `workflows/Jenkinsfile.ci`
 
 ```
 cleanup → checkout
-  → policy lint      : docker run kyverno/kyverno:1.19.0 kyverno apply policies/ --dry-run=client
-  → policy unit tests: docker run kyverno/kyverno:1.19.0 kyverno test tests/policies
-  → IaC scan         : docker run aquasec/trivy:<ver> trivy config --severity CRITICAL,HIGH --exit-code 1 resources/
-post: archive reports/*.sarif, test output
-```
+  → tool setup         : bootstrap version-pinned kyverno binary into .tools/ (no official CLI docker image)
+  → policy unit tests  : .tools/kyverno test tests/policies
+  → policy conformance : .tools/kyverno apply policies/ -r tests/conformance/ -f tests/conformance/values.yaml
+  → IaC scan           : docker run aquasec/trivy:<ver> config --severity CRITICAL,HIGH --exit-code 1 --skip-dirs admission resources/
+  → policy schema lint : kubectl apply --dry-run=server -f policies/   (kind-kubeconfig; CRD strict-decode)
+  → policy install     : kubectl apply -f policies/            (kind-kubeconfig credential)
+  → policy ready       : kubectl wait --for=condition=Ready clusterpolicy --all --timeout=120s
+post: archive reports/kyverno-test.txt, kyverno-conformance.txt, trivy-config.txt
+
+Offline checks (unit tests, conformance, IaC) run **first** — they need no cluster and
+catch most issues. The cluster checks (lint → install → ready) run last, so a downed
+cluster cannot prevent the offline signal from being produced.
+
+Two tooling notes (verified):
+- **No `kyverno/kyverno` CLI docker image exists** (the controller image is not the CLI).
+  CI bootstraps the version-pinned binary from the GitHub release (`kyverno-cli_v<ver>_<os>_<arch>.tar.gz`),
+  reusing a matching local install to avoid the ~52MB download.
+- **The `aquasec/trivy` image entrypoint is already `trivy`**, so the subcommand is `config`
+  (not `trivy config`). `--skip-dirs admission` excludes the attacker pod (an intentional
+  rejection target, not a deployable resource).
+
+The last two stages are the **policy execution stage** — the only path by which
+policies enter the cluster:
+
+- `policy install` runs **only after** lint + unit tests + IaC scan pass (declarative
+  pipeline semantics: a non-zero exit in any earlier stage aborts the build).
+- `kubectl apply --dry-run=server` runs the real CRD structural schema (catches
+  unknown fields / bad shapes) without creating anything. It does **not** compile
+  CEL — that is the job of the unit-test stage.
+- **Two offline checks, two different signals** (both need the namespace labels
+  injected, or they vacuously pass for label-scoped policies):
+  - `kyverno test tests/policies` — **assertions** (expected pass/fail). The primary
+    gate: proves each rule's *behaviour* both directions (compliant passes, violating
+    denied) and is the CEL compile-error net. The attacker pod is a `result: fail`
+    fixture here (an *expected* denial).
+  - `kyverno apply policies/ -r tests/conformance/ -f values.yaml` — **conformance**
+    (the official dry-run). Proves the *actual* app resources pass all 13; exit 0.
+    Pointed at real app manifests (not the synthetic test fixtures), so it catches
+    drift in the app's security context.
+  - Without `-f values.yaml` (or `kyverno test`'s `variables:`), `namespaceSelector`
+    rules are silently *Excluded* offline → `pass: 0, fail: 0` (a vacuous green).
+    Verified: with `-f`, the compliant app pod passes all 14 rules; the attacker pod
+    trips 13.
+- The admission webhook is a single generic, policy-agnostic endpoint (verified:
+  one webhook matching all Pods/Deployments/...), so there is no per-policy
+  webhook to wait for. `kubectl wait --for=condition=Ready` blocks until the policy
+  object is accepted and compiled into Kyverno's policy cache; enforcement was
+  measured live at ~1s after apply. The wait is cheap insurance against the
+  (unmeasured-here) cache-sync window on larger clusters.
+- **Compile-error net:** `Ready=True` does **not** prove the CEL compiles
+  (verified: a broken CEL expression still reports `Ready=True reason=Succeeded`).
+  In-cluster a broken CEL rule fails *closed* — it denies every request in the
+  matched namespaces (an availability outage, not a security hole). So
+  `kyverno test` (stage above) is the real compile-error net: a broken expression
+  flips a `pass` fixture to `fail` and the build fails before install.
+- **Null-safety for DELETE / status updates (verified, cost us a stuck cluster):**
+  Kyverno's resource validating webhook is registered for `CONNECT, CREATE, DELETE,
+  UPDATE` — not just create/update. In a **DELETE** admission request (and in a Pod
+  **status** subresource update) the `object` has **no `spec`**, so any CEL expression
+  that references `object.spec.*` raises `no such key: spec`. Because a CEL error
+  fails *closed*, every such policy **denied all pod deletions** in the tenant
+  namespaces — rollouts and manual cleanup deadlocked (a pod that can't be deleted
+  also pins its RWO PVC, so the replacement pod can't schedule). Fix: guard every
+  `validate.cel` expression with `!has(object.spec) || ( ... )`. The guard is
+  vacuously true when there is no spec to validate (DELETE / status update) and is a
+  no-op for CREATE/UPDATE, so enforcement is unchanged — `kyverno test` and the
+  conformance run still pass 28/28. `validate.pattern` rules are **not** affected
+  (they were observed to pass DELETE through), which is why the two pattern-based
+  policies needed no change.
+- Idempotent: re-applying unchanged policies is a no-op; a changed policy is hot-
+  swapped in the cluster on the next CI run.
 
 - **No gate framework** (unlike the sibling repo): each tool's exit code *is* the
   gate — `kyverno test` non-zero → build fails; `trivy --exit-code 1` with
   CRITICAL/HIGH findings → build fails. The scenario is simple enough that a
   findings-normalization layer would be overhead.
-- `kyverno test` is the policy gate: if a policy change breaks a test expectation,
-  CI fails before the policy can touch a cluster.
+- **Alternative:** a dedicated `Jenkinsfile.policies` job (or ArgoCD) would separate
+  policy governance from app CI. Kept in CI here because policies and their tests
+  live in one tree and change together.
 
 ### 10.2 CD — `workflows/Jenkinsfile.cd`
 
@@ -537,9 +623,6 @@ cleanup → checkout → Initialize (param validation: IMAGE must be a @sha256: 
                          → kubectl rollout status (bounded 5m)
   → verify             : PolicyReports, netpol behavior, RBAC can-i, kubelet check
                          (subset of tests/verify.sh)
-  → negative admission : kubectl apply resources/admission/pod.attacker.yaml
-                         → MUST fail; assert the rejection message mentions the
-                         trust list (a "passing" apply fails the build)
 post: archive verification evidence, chart .tgz/.prov
 ```
 
@@ -548,36 +631,38 @@ image already exists in the governed registry with a cosign signature (produced 
 SETUP_DEMO.md). `IMAGE` is validated to be a `@sha256:` reference, so mutable tags
 cannot be deployed.
 
+**Why no in-cluster negative test:** CD asserts only that the compliant path works.
+Rejection behaviour (attacker pod, unattested image) is proven offline by
+`kyverno test`; duplicating it in the pipeline would add a mutable-resource
+apply/cleanup cycle to the deploy job. The rejection is still demonstrated **live
+and manually** in the demo script (§14) with `resources/admission/pod.attacker.yaml`,
+
 ## 11. Tests
 
 ```
 tests/
 ├── policies/
 │   ├── require-non-root/
-│   │   ├── kyverno-test.yaml      # kind: Test — policies + resources + expected results
+│   │   ├── kyverno-test.yaml      # cli.kyverno.io/v1alpha1 Test — policies + resources + results
+│   │   ├── values.yaml            # namespaceSelector labels (required, else rules are "Excluded")
 │   │   ├── pod-compliant.yaml     # expected: pass
-│   │   └── pod-root.yaml          # expected: fail
+│   │   └── pod-root.yaml          # expected: fail (also the guard: a broken selector can't satisfy "fail")
 │   ├── disallow-privilege-escalation/ ...   (one dir per policy: ≥1 pass + ≥1 fail fixture)
 │   └── ...
-├── admission/
-│   └── pod-attacker.yaml          # in-cluster negative test (also referenced by CD)
 └── verify.sh                      # end-to-end cluster verification
 ```
 
 - **Unit (offline):** `kyverno test tests/policies` — every policy has at least one
   compliant fixture (`result: pass`) and one violating fixture (`result: fail`).
   Runs in CI; no cluster needed.
-- **Admission (in-cluster):** the CD negative stage + `verify.sh` apply violating
-  manifests and assert rejection with the expected message.
-- **`verify.sh` (evidence collector):**
-  1. all 13 ClusterPolicies installed (Enforce);
-  2. both apps Running; PolicyReports show pass counts;
-  3. attacker pod apply → rejected (grep trust-list message);
-  4. hand-applied Deployment (compliant image, no attestation annotations) →
-     rejected by `require-image-attestation`;
-  5. RBAC matrix via alice/bob oidc kubeconfigs (can-i table);
-  6. kubelet anonymous curl → 401/403; kube-bench node output archived;
-  7. netpol: `shop` pod → `analytics:9090` succeeds (explicit allow),
+- **Admission behaviour (offline):** `kyverno test` is where denials are asserted —
+  one dir per policy, ≥1 pass + ≥1 fail fixture. No in-cluster negative tests.
+- **`verify.sh` (evidence collector, positive-only):**
+  1. all 13 ClusterPolicies installed, `Enforce`, and `Ready=True`;
+  2. both apps Running; PolicyReports in the tenant namespaces show **0 fail**;
+  3. RBAC matrix via alice/bob oidc kubeconfigs (can-i table);
+  4. kubelet anonymous curl → 401/403; kube-bench node output archived;
+  5. netpol: `shop` pod → `analytics:9090` succeeds (explicit allow),
      `shop` pod → external host fails (default-deny egress).
 
 ## 12. Directory layout
@@ -609,10 +694,9 @@ kube-security/
 │   │       ├── keys/public.asc  # committed GPG public key
 │   │       └── templates/       # sa, deployment, service, pvc, netpols, role
 │   └── admission/
-│       └── pod.attacker.yaml    # rogue pod (moved from resources/ root)
+│   └── pod.attacker.yaml    # rogue pod — manual demo rejection target
 ├── tests/
 │   ├── policies/<policy>/       # kyverno-test.yaml + fixtures per policy
-│   ├── admission/               # in-cluster negative manifests
 │   └── verify.sh
 ├── workflows/
 │   ├── Jenkinsfile.ci
@@ -664,6 +748,8 @@ kube-security/
 | kind admin kubeconfig for CD | Simplest platform-operator identity | Real org: dedicated CD ServiceAccount + minimal per-tenant Role (noted in README) |
 | cosign signature as image trust anchor | Scan happens in the app pipeline before signing (verified ⇒ scanned); CD verifies with the committed public key (`cosign-pub`) | No in-cluster signature check — attestation annotations + digest match are the admission-time proxy |
 | Hardcoded exit-code gates (no gate framework) | Scenario is simple: each tool (kyverno test, trivy, cosign verify, helm verify) has a binary verdict | No cross-tool findings normalization/reporting (sibling repo has it) |
+| Policies installed by **CI** (the policy execution stage) | Policies + tests live in one tree and change together; the test gate is the precondition for install | CI holds cluster credentials for two purposes (test + install); a dedicated policy job or ArgoCD would isolate that better |
+| No in-cluster negative admission test | `kyverno test` already proves each rule's pass/fail behaviour offline; keeps CD deploy-only | A policy that installs but misbehaves in-cluster surfaces via PolicyReports, not a synthetic denial |
 
 ## 16. References
 
