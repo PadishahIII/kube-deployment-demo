@@ -40,6 +40,15 @@ kubectl oidc-login login
 kubectl auth can-i get pods -n tenant-b   # no
 ```
 
+A successful CI run:
+
+<img width="1370" height="79" alt="image" src="https://github.com/user-attachments/assets/2d183d11-8234-4969-83a8-2a45e2187d25" />
+
+A blocking CI run:
+
+<img width="1426" height="636" alt="image" src="https://github.com/user-attachments/assets/f57abaaa-8caa-4b8e-9eaa-089b8ad0c152" />
+
+
 ## Directory Structure
 
 ```
