@@ -7,7 +7,7 @@ image:
   # Defaults only — a real deploy always provides one of:
   #   - image.fullRef (digest-pinned, preferred; CD stamps it after cosign verify)
   #   - image.repository + image.tag
-# Without either, the chart refuses to render (fail-closed).
+  # Without either, the chart refuses to render (fail-closed).
   repository: ""
   tag: ""
   fullRef: ""
@@ -31,7 +31,7 @@ containerPort: 8080
 
 # Pod-level security context.
 securityContext:
-  runAsNonRoot: true
+  runAsNonRoot: false
   runAsUser: 1000
   fsGroup: 1000
   seLinuxOptions:
@@ -46,7 +46,7 @@ containerSecurityContext:
   procMount: Default
   capabilities:
     drop:
-    - ALL
+      - ALL
 
 persistence:
   enabled: true
