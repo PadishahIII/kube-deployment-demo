@@ -67,24 +67,22 @@ Images are built and signed by the application repo's pipeline — for the demo,
 is the one-time "Producing the demo signed images" section in SETUP_DEMO.md. To add
 a new app (or a new tenant):
 
-1. **Write the app** under `demo-apps/<app>/`:
-   - `Dockerfile` from `gcr.io/distroless/nodejs22` (or another governed base),
-     `USER node` (non-root), listen on a port **> 1023** (non-root can't bind <1024).
-   - No shell, no setuid — distroless keeps the surface small.
-2. **Produce the signed image** (SETUP_DEMO.md): build → `trivy image --severity
-   CRITICAL,HIGH --exit-code 1` → `cosign sign` → push to the governed org
-   (`padishahiii/…` on Docker Hub). Note the image **digest**.
-3. **Add tenant values** — copy `resources/helm/webapp/values-tenant-a.yaml` to
+1. **Write the app**: in certain application repo
+   - Build image, pass development-side CI (check <https://github.com/PadishahIII/devsecops-demo>), push image to whatever docker registry, sign the image via cosign
+2. **Add tenant values** — copy `resources/helm/webapp/values-tenant-a.yaml` to
    `values-<tenant>.yaml` and set: `name`, `port`, PVC size, the ingress-allow
    peers (which namespaces may call this app), and the developer-owned image +
    attestation: digest-pinned `image.fullRef` and `annotations.imageVerified:
-   cosign` / `annotations.imageDigest: <digest>` (the same values CD re-stamps
+cosign` / `annotations.imageDigest: <digest>` (the same values CD re-stamps
    after every `cosign verify`).
    - If it's a **new tenant**: add the namespace (labeled `tenancy.io/tenant: "true"`
      in `resources/cluster/namespaces.yaml`) and a per-tenant Role/RoleBinding in
      `resources/cluster/rbac.yaml`. That's all — the policies pick up the new
      namespace automatically via the label selector, and CI conformance picks up
      the new `values-<tenant>.yaml` automatically (no pipeline edits).
+3. **Create A PR** for this repo
+   - Add the k8s resources for your application, under `resources/helm/`.
+   - It will trigger Jenkins **CI** pipeline and block the PR if fail.
 4. **Run the CD pipeline** with `TENANT=<tenant>` and
    `IMAGE=padishahiii/<app>@sha256:<digest>`: it cosign-verifies the image,
    GPG-signs the chart, and `helm upgrade --install`s it (stamping the attestation
@@ -107,21 +105,21 @@ policy execution stage**: only policies that lint clean and pass their tests get
 `kubectl apply`-ed to the cluster (DESIGN.md §10.1). Denials are asserted offline by
 `kyverno test` — not re-derived by applying violating pods in-cluster.
 
-| Policy file | Security consideration |
-| --- | --- |
-| `require-non-root.yaml` | Application processes must not run as root (`runAsNonRoot: true`). |
-| `disallow-privilege-escalation.yaml` | `allowPrivilegeEscalation: false` on every container (blocks e.g. setuid binaries, `CAP_SYS_PTRACE`-style escalation). |
-| `require-readonly-rootfs.yaml` | `readOnlyRootFilesystem: true` — a compromised process can't drop tools, persist, or tamper with its own filesystem. Writable state goes to explicit volumes (PVC). |
-| `require-default-proc-mount.yaml` | Rejects `procMount: Unmasked` — the default (masked) /proc hides kernel memory and other processes' `/proc/<pid>/mem`. |
-| `disallow-host-namespaces.yaml` | No `hostNetwork`/`hostPID`/`hostIPC`. Host networking would also silently bypass NetworkPolicies — the pod would talk on the host's interfaces. |
-| `require-drop-all-capabilities.yaml` | `capabilities.drop: [ALL]` — no unused Linux capabilities; add back only what a workload provably needs. |
-| `require-selinux-options.yaml` | Requires `seLinuxOptions.level` — fine-grained MAC labels. *Honest caveat:* the kind node doesn't run SELinux, so this enforces spec-level conformance in the lab; on an SELinux-enabled node the runtime enforces it for real. |
-| `require-dedicated-serviceaccount.yaml` | Each app gets its own ServiceAccount; the shared `default` SA is forbidden (no identity sharing, clean audit trail). |
-| `require-automount-sa-token-false.yaml` | Apps that don't call the Kubernetes API get no mounted SA credentials — removes a classic lateral-movement artifact. |
-| `disallow-privileged-containers.yaml` | Defense in depth: `privileged: true` is never allowed (full device access + most caps). |
-| `require-image-allowlist.yaml` | **Governed image trust list** — only images from `docker.io/padishahiii/*` (the org the platform builds & scans) may run. The list is a versioned `variables` block in the policy, reviewed like code. (Production variant: ConfigMap + `apiCall` for hot updates — see DESIGN.md §6.2.) |
-| `require-image-digest.yaml` | Images must be referenced by `@sha256:` digest — no mutable tags in deployments. |
-| `require-image-attestation.yaml` | **Only verified images admitted.** The application pipeline Trivy-scans the image *before* cosign-signing it; CD cosign-verifies it and stamps the pod template with `security.devsecops.io/image-verified=cosign` + the attested digest; this policy requires both the annotation **and** that the attested digest matches the running image (closes the re-tag-after-verify hole). |
+| Policy file                             | Security consideration                                                                                                                                                                                                                                                                                                                                                               |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `require-non-root.yaml`                 | Application processes must not run as root (`runAsNonRoot: true`).                                                                                                                                                                                                                                                                                                                   |
+| `disallow-privilege-escalation.yaml`    | `allowPrivilegeEscalation: false` on every container (blocks e.g. setuid binaries, `CAP_SYS_PTRACE`-style escalation).                                                                                                                                                                                                                                                               |
+| `require-readonly-rootfs.yaml`          | `readOnlyRootFilesystem: true` — a compromised process can't drop tools, persist, or tamper with its own filesystem. Writable state goes to explicit volumes (PVC).                                                                                                                                                                                                                  |
+| `require-default-proc-mount.yaml`       | Rejects `procMount: Unmasked` — the default (masked) /proc hides kernel memory and other processes' `/proc/<pid>/mem`.                                                                                                                                                                                                                                                               |
+| `disallow-host-namespaces.yaml`         | No `hostNetwork`/`hostPID`/`hostIPC`. Host networking would also silently bypass NetworkPolicies — the pod would talk on the host's interfaces.                                                                                                                                                                                                                                      |
+| `require-drop-all-capabilities.yaml`    | `capabilities.drop: [ALL]` — no unused Linux capabilities; add back only what a workload provably needs.                                                                                                                                                                                                                                                                             |
+| `require-selinux-options.yaml`          | Requires `seLinuxOptions.level` — fine-grained MAC labels. _Honest caveat:_ the kind node doesn't run SELinux, so this enforces spec-level conformance in the lab; on an SELinux-enabled node the runtime enforces it for real.                                                                                                                                                      |
+| `require-dedicated-serviceaccount.yaml` | Each app gets its own ServiceAccount; the shared `default` SA is forbidden (no identity sharing, clean audit trail).                                                                                                                                                                                                                                                                 |
+| `require-automount-sa-token-false.yaml` | Apps that don't call the Kubernetes API get no mounted SA credentials — removes a classic lateral-movement artifact.                                                                                                                                                                                                                                                                 |
+| `disallow-privileged-containers.yaml`   | Defense in depth: `privileged: true` is never allowed (full device access + most caps).                                                                                                                                                                                                                                                                                              |
+| `require-image-allowlist.yaml`          | **Governed image trust list** — only images from `docker.io/padishahiii/*` (the org the platform builds & scans) may run. The list is a versioned `variables` block in the policy, reviewed like code. (Production variant: ConfigMap + `apiCall` for hot updates — see DESIGN.md §6.2.)                                                                                             |
+| `require-image-digest.yaml`             | Images must be referenced by `@sha256:` digest — no mutable tags in deployments.                                                                                                                                                                                                                                                                                                     |
+| `require-image-attestation.yaml`        | **Only verified images admitted.** The application pipeline Trivy-scans the image _before_ cosign-signing it; CD cosign-verifies it and stamps the pod template with `security.devsecops.io/image-verified=cosign` + the attested digest; this policy requires both the annotation **and** that the attested digest matches the running image (closes the re-tag-after-verify hole). |
 
 **Cluster-level controls** (not Kyverno):
 
@@ -129,7 +127,7 @@ policy execution stage**: only policies that lint clean and pass their tests get
   an external OIDC issuer (dex in `platform` ns); identities + groups flow into RBAC.
   See `kind/cluster-config.yaml` and SETUP_DEMO.md.
 - **RBAC properly** — no human has cluster-admin; per-tenant Role/RoleBindings
-  (alice→tenant-a, bob→tenant-b); app ServiceAccounts have *zero* API permissions.
+  (alice→tenant-a, bob→tenant-b); app ServiceAccounts have _zero_ API permissions.
 - **Kubelet access limited** — anonymous auth off, read-only port 0, webhook
   authorization; verified by `tests/verify.sh` (anonymous curl → 401) and kube-bench.
 - **NetworkPolicies** — default-deny ingress+egress per tenant; explicit allows only
@@ -172,7 +170,7 @@ policy execution stage**: only policies that lint clean and pass their tests get
 - **DAST** — covered by the sibling repo `devsecops-demo` (in-cluster ZAP + DAST-aware gate)
 - **Image build/push/scan pipeline** — the application repo's job; SETUP_DEMO.md
   walks through producing the demo signed images (build → trivy → cosign sign → push).
-  cosign *signing* itself is demonstrated in `devsecops-demo`.
+  cosign _signing_ itself is demonstrated in `devsecops-demo`.
 - **Gate framework** (sibling repo's findings normalization) — this repo hardcodes
   failure gates (tool exit codes) in the pipeline
 - **PodSecurityAdmission labels** — complementary to these policies (PSS `restricted`

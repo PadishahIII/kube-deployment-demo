@@ -123,7 +123,7 @@ annotations:
                     def app = (params.TENANT == 'tenant-a') ? 'shop' : 'analytics'
                     sh """
                         set -euo pipefail
-                        helm upgrade --install ${app} ${env.CHART_TGZ} -n ${params.TENANT} --create-namespace \
+                        helm upgrade --install ${app} '${env.CHART_TGZ}' -n ${params.TENANT} --create-namespace \
                             -f resources/helm/webapp/values-${params.TENANT}.yaml \
                             -f rendered/values-image.yaml
                         kubectl rollout status deployment/${app} -n ${params.TENANT} --timeout=5m
@@ -174,7 +174,8 @@ annotations:
 
 // Package the in-repo Helm chart, GPG-sign it (private key from the `helm-signing-key`
 // File credential), and verify the signature using ONLY the committed public key.
-// Returns the path to the signed .tgz.
+// Returns the basename of the signed .tgz — the archive is always moved to the
+// workspace root, so no caller ever depends on an absolute path.
 //
 // GPG notes — Helm 4 signs/verifies with a built-in Go openpgp library (ProtonMail/go-crypto):
 //   * it reads the OLD binary keyring format only; armored keys and the modern .kbx both
@@ -194,11 +195,26 @@ def buildSignedChart() {
             chmod 600 rendered/secring.gpg
             IDENTITY=\$(gpg --show-keys --with-colons resources/helm/webapp/keys/public.asc | awk -F: '/^uid/{print \$10; exit}')
             [ -n "\$IDENTITY" ] || { echo 'could not derive signing identity from public key' >&2; exit 1; }
-            helm package --sign --key "\$IDENTITY" --keyring rendered/secring.gpg resources/helm/webapp/ 2>&1 | grep -oE '[^ ]+\\.tgz' | tail -1
+            # Package into a scratch dir, move the result to the workspace root, and echo
+            # ONLY its basename. Never parse the chart path out of the `helm package`
+            # message: it prints "saved it to: <abs path>", and an abs path containing a
+            # space (a job named e.g. "K8s deployment" -> .../K8s deployment/webapp.tgz)
+            # makes a whitespace-based regex return a bogus relative path.
+            STAGE=\$(mktemp -d)
+            helm package --sign --key "\$IDENTITY" --keyring rendered/secring.gpg \\
+                --destination "\$STAGE" resources/helm/webapp/ >&2
+            [ \$(find "\$STAGE" -maxdepth 1 -name '*.tgz' | wc -l | tr -d ' ') -eq 1 ] \\
+                || { echo 'helm package did not produce exactly one .tgz' >&2; exit 1; }
+            CHART=\$(basename "\$STAGE"/*.tgz)
+            # Signing succeeded <=> the provenance file exists next to the archive.
+            [ -f "\$STAGE/\$CHART.prov" ] || { echo 'chart was not signed (no .prov produced)' >&2; exit 1; }
+            mv "\$STAGE/\$CHART" "\$STAGE/\$CHART.prov" .
+            rmdir "\$STAGE"
+            echo "\$CHART"
         """, returnStdout: true).trim()
     }
-    if (!tgz || !tgz.endsWith('.tgz')) {
-        error "helm package produced no .tgz (chart signing failed)"
+    if (!tgz || !tgz.endsWith('.tgz') || tgz.contains('/')) {
+        error "helm package produced no .tgz (chart signing failed): '${tgz}'"
     }
     echo "signed chart: ${tgz}"
     // Verify with the committed public key ONLY — no secret key is present here.
@@ -206,7 +222,7 @@ def buildSignedChart() {
         set -euo pipefail
         export GNUPGHOME=\$(mktemp -d); chmod 700 "\$GNUPGHOME"
         gpg --dearmor < resources/helm/webapp/keys/public.asc > rendered/pubring.gpg
-        helm verify ${tgz} --keyring rendered/pubring.gpg
+        helm verify '${tgz}' --keyring rendered/pubring.gpg
     """
     return tgz
 }
