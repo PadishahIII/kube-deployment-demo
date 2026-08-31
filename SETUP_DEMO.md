@@ -195,24 +195,40 @@ docker run --rm \
 
 ### 5.2 Helm chart signing — GPG provenance
 
+The signing key is **shared with the sibling `devsecops-demo` project** — the
+Jenkins `helm-signing-key` credential is
+`devsecops-demo/deploy/helm/keys/helm-signing-key.asc` (ed25519,
+`devsecops-demo <devsecops-demo@localhost>`). This repo commits only the
+matching **public** half:
+
 ```bash
-./tools/generate-helm-signing-key.sh "kube-security chart signing" "charts@devsecops.local"
+# 1. Export the public half of the Jenkins credential key → committed public key
+GNUPGHOME=$(mktemp -d); chmod 700 "$GNUPGHOME"
+gpg --dearmor < ../devsecops-demo/deploy/helm/keys/helm-signing-key.asc | \
+    gpg --homedir "$GNUPGHOME" --import
+gpg --homedir "$GNUPGHOME" --armor --export 'devsecops-demo@localhost' \
+    > resources/helm/webapp/keys/public.asc
+# 2. Sign + verify locally (CI does the same, dearmoring both keys)
+gpg --dearmor < ../devsecops-demo/deploy/helm/keys/helm-signing-key.asc > rendered/secring.gpg
+helm package --sign --key 'devsecops-demo <devsecops-demo@localhost>' \
+    --keyring rendered/secring.gpg resources/helm/webapp/
+gpg --dearmor < resources/helm/webapp/keys/public.asc > rendered/pubring.gpg
+helm verify webapp-0.1.0.tgz --keyring rendered/pubring.gpg
 ```
 
-The script:
+**Gotchas:**
 
-1. Generates an RSA key **with the `sign,cert` usage flags** — the `sign` flag
-   is **required**: Helm 4's go-crypto matches signatures via
-   `KeysByIdUsage(issuerKeyId, KeyFlagSign)`, so a `cert`-only key loads but
-   never matches (`signature made by unknown entity`).
-2. Prints the **armored private key** — copy it into Jenkins credential
-   **`helm-signing-key`** (Secret file).
-3. Writes the public key to `resources/helm/webapp/keys/public.asc` — the repo
-   already ships one (committed); if you regenerate, commit the new public key
-   and keep the private key only in Jenkins.
-
-CD dearmors both keys at runtime (Helm 4 rejects armored keyrings) and derives
-the `--key` identity from the committed public key.
+1. `public.asc` must be the public half of the **same key** as the Jenkins
+   credential — otherwise `helm verify` fails with
+   `signature made by unknown entity`. The credential (key `091A313302D40904`)
+   and the sibling's own committed `public.asc` (key `7035B1DAE6B01D6E`) were
+   out of sync after a rotation; always export the public half from the
+   credential file itself.
+2. The key **must have the `sign` usage flag** (key flags `0x03`): Helm 4's
+   go-crypto matches signatures via `KeysByIdUsage(issuerKeyId, KeyFlagSign)`,
+   so a `cert`-only key loads but never matches.
+3. Helm 4 rejects armored keyrings — dearmor both keys at runtime (the
+   pipeline does this in `buildSignedChart()`).
 
 ---
 
@@ -236,7 +252,7 @@ java -jar jenkins.war --httpPort=8081
 
 - **Pipeline** (workflow-aggregator) — the jobs are scripted Pipelines.
 - **Credentials Binding** — `withCredentials` (both jobs).
-- **Kubernetes** is *not* required (the pipelines use the `kubectl`/`helm`
+| `helm-signing-key` | Secret file          | armored private key, shared from `devsecops-demo/deploy/helm/keys/helm-signing-key.asc` (§5.2) |
   CLIs with the `kind-kubeconfig` file credential).
 
 ---

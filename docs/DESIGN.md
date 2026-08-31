@@ -462,9 +462,11 @@ One chart, `resources/helm/webapp/`, deployed as two releases (`shop` in tenant-
   deploy: `helm verify webapp-<ver>.tgz --keyring <pubring>`.
 - The signed `.tgz` is the deploy artifact; `helm upgrade --install` is idempotent
   with `--create-namespace`, followed by bounded `kubectl rollout status`.
-- Key management: `tools/generate-helm-signing-key.sh` writes `public.asc`
-  (committed) + private key (gitignored); the private key is a Jenkins Secret-file
-  credential `helm-signing-key`. Helm 4 signs with its built-in Go openpgp — the
+- Key management: the Jenkins `helm-signing-key` credential is shared with the
+  sibling `devsecops-demo` repo (`deploy/helm/keys/helm-signing-key.asc`,
+  ed25519 `devsecops-demo <devsecops-demo@localhost>`); `public.asc` here is
+  the public half of that same key, exported from the credential file (see
+  SETUP_DEMO.md §5.2). Helm 4 signs with its built-in Go openpgp — the
   pipeline dearmors first (same gotcha as the sibling project).
 
 **Chart contents (templates/):** `serviceaccount.yaml`, `deployment.yaml` (security
