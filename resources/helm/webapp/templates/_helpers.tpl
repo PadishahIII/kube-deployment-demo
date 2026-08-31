@@ -17,7 +17,9 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- define "webapp.image" -}}
 {{- if .Values.image.fullRef -}}
 {{- .Values.image.fullRef -}}
-{{- else -}}
+{{- else if and .Values.image.repository .Values.image.tag -}}
 {{- printf "%s:%s" .Values.image.repository .Values.image.tag -}}
+{{- else -}}
+{{- fail "no image: set image.fullRef (digest-pinned) or image.repository:tag" -}}
 {{- end -}}
 {{- end -}}

@@ -480,8 +480,9 @@ RoleBindings in `resources/cluster/rbac.yaml` match on them.
   `!has(object.spec) || (...)` guard (Kyverno's webhook is registered for
   DELETE too). The policies in this repo carry the guard — don't strip it
   when forking. See DESIGN.md §10.1.
-- **`kyverno apply` shows `pass: 0, fail: 0`** — two known causes: you forgot `-f
-  tests/conformance/values.yaml` (namespaceSelector labels not injected), or the
+- **`kyverno apply` shows `pass: 0, fail: 0`** — two known causes: you forgot the
+  namespaceSelector values file (labels not injected — CI rebuilds it from the tenant
+  values files), or the
   rendered app resources carry no `metadata.namespace` — `helm template` does not
   stamp one, and namespaceSelector rules silently Exclude without it. The CI
   stage handles both (values file + `kubectl create --dry-run=client -n <ns>`);

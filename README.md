@@ -75,12 +75,16 @@ a new app (or a new tenant):
    CRITICAL,HIGH --exit-code 1` → `cosign sign` → push to the governed org
    (`padishahiii/…` on Docker Hub). Note the image **digest**.
 3. **Add tenant values** — copy `resources/helm/webapp/values-tenant-a.yaml` to
-   `values-<tenant>.yaml` and set: `name`, `port`, PVC size, and the ingress-allow
-   peers (which namespaces may call this app).
+   `values-<tenant>.yaml` and set: `name`, `port`, PVC size, the ingress-allow
+   peers (which namespaces may call this app), and the developer-owned image +
+   attestation: digest-pinned `image.fullRef` and `annotations.imageVerified:
+   cosign` / `annotations.imageDigest: <digest>` (the same values CD re-stamps
+   after every `cosign verify`).
    - If it's a **new tenant**: add the namespace (labeled `tenancy.io/tenant: "true"`
      in `resources/cluster/namespaces.yaml`) and a per-tenant Role/RoleBinding in
      `resources/cluster/rbac.yaml`. That's all — the policies pick up the new
-     namespace automatically via the label selector.
+     namespace automatically via the label selector, and CI conformance picks up
+     the new `values-<tenant>.yaml` automatically (no pipeline edits).
 4. **Run the CD pipeline** with `TENANT=<tenant>` and
    `IMAGE=padishahiii/<app>@sha256:<digest>`: it cosign-verifies the image,
    GPG-signs the chart, and `helm upgrade --install`s it (stamping the attestation

@@ -1,18 +1,21 @@
 replicaCount: 1
 # The single source of truth for the app name (resource names + `app` label).
+# Each tenant values file sets it (nameOverride: shop / analytics / ...).
 nameOverride: ""
 
 image:
-  repository: docker.io/padishahiii/kube-sec-shop
-  tag: "1.0.0"
-  # CD stamps a full digest-pinned reference here after cosign verify, e.g.
-  #   docker.io/padishahiii/kube-sec-shop@sha256:...
-  # When set, it overrides repository:tag.
+  # Defaults only — a real deploy always provides one of:
+  #   - image.fullRef (digest-pinned, preferred; CD stamps it after cosign verify)
+  #   - image.repository + image.tag
+# Without either, the chart refuses to render (fail-closed).
+  repository: ""
+  tag: ""
   fullRef: ""
   pullPolicy: IfNotPresent
 
-# Attestation annotations, stamped by CD after `cosign verify` succeeds.
-# Left empty by default so a non-CD deploy is DENIED by require-image-attestation.
+# Attestation annotations, stamped by the developer (tenant values) and re-stamped
+# by CD after `cosign verify` succeeds. Left empty by default so a non-CD deploy is
+# DENIED by require-image-attestation.
 annotations:
   imageVerified: ""
   imageDigest: ""

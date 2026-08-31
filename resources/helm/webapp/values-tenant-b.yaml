@@ -1,8 +1,17 @@
 # analytics — tenant-b, :9090. Reachable from tenant-a (shop); no egress beyond DNS.
+# Image + attestation are developer-owned: fullRef is the digest-pinned ref of the
+# image this file describes, and annotations.image* say the cosign-verified state
+# (CD re-stamps both after every verify — a fresh digest here means the app was
+# re-signed and re-verified). Replace the placeholder digest with your signed
+# image's digest (SETUP_DEMO.md).
 nameOverride: analytics
 image:
   repository: docker.io/padishahiii/kube-sec-analytics
   tag: "1.0.0"
+  fullRef: docker.io/padishahiii/kube-sec-analytics@sha256:2222222222222222222222222222222222222222222222222222222222222222
+annotations:
+  imageVerified: cosign
+  imageDigest: sha256:2222222222222222222222222222222222222222222222222222222222222222
 service:
   port: 9090
 containerPort: 9090

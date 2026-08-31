@@ -477,9 +477,10 @@ Deployment metadata, since only pod-template annotations propagate to Pods),
 rules from values), `role.yaml` (empty/minimal placeholder — app SAs get no perms).
 
 **Per-tenant values** (`values-tenant-a.yaml`, `values-tenant-b.yaml`): name, port,
-PVC size, ingress-allow peers (tenant-b allows from tenant-a). The image reference
-and attestation come from the per-build `rendered/values-image.yaml` written by CD
-(see §8.2).
+PVC size, ingress-allow peers (tenant-b allows from tenant-a), and the developer-owned
+image + attestation (digest-pinned `image.fullRef` + `annotations.imageVerified/
+imageDigest` — the same shape CD stamps per build in `rendered/values-image.yaml`,
+see §8.2). CI renders these files as-is; no app data lives in the pipeline.
 
 ## 9. Demo applications
 
@@ -527,8 +528,10 @@ Cleanup, Timestamper, Git.
 cleanup → checkout
   → tool setup         : bootstrap version-pinned kyverno + helm binaries into .tools/ (no official CLI docker image)
   → policy unit tests  : .tools/kyverno test tests/policies
-  → policy conformance : helm template webapp per tenant | kubectl create --dry-run=client (namespace stamp)
-                         → .tools/kyverno apply policies/ -r <rendered>/ -f tests/conformance/values.yaml
+  → policy conformance : for each resources/helm/webapp/values-<tenant>.yaml (developer-owned,
+                         incl. image.fullRef + annotations.image*): helm template | kubectl create
+                         --dry-run=client (namespace stamp) → .tools/kyverno apply policies/ -r <rendered>/
+                         -f <rendered>/values.yaml (namespaceSelector rebuilt from the same tenant files)
   → IaC scan           : docker run aquasec/trivy:<ver> config --severity CRITICAL,HIGH --exit-code 1 --skip-dirs admission resources/
   → policy schema lint : kubectl apply --dry-run=server -f policies/   (kind-kubeconfig; CRD strict-decode)
   → policy install     : kubectl apply -f policies/            (kind-kubeconfig credential)
@@ -561,7 +564,7 @@ policies enter the cluster:
     gate: proves each rule's *behaviour* both directions (compliant passes, violating
     denied) and is the CEL compile-error net. The attacker pod is a `result: fail`
     fixture here (an *expected* denial).
-  - `kyverno apply policies/ -r <rendered>/ -f values.yaml` — **conformance**
+  - `kyverno apply policies/ -r <rendered>/ -f <rendered>/values.yaml` — **conformance**
     (the official dry-run). Proves the *actual* app resources pass all 13; exit 0.
     The app manifests are **rendered from the webapp chart at CI time** (helm
     template → `kubectl create --dry-run=client` namespace stamp), not stored as
@@ -569,7 +572,11 @@ policies enter the cluster:
     a security-context change to the chart flips conformance in the same commit
     instead of drifting in a stale copy under tests/. Deployments are autogen-
     expanded to Pods, mirroring the real admission path; per-tenant renders land in
-    `reports/conformance-rendered/` (gitignored).
+    `reports/conformance-rendered/` (gitignored). CI is app-agnostic: it iterates
+    the developer-owned `resources/helm/webapp/values-<tenant>.yaml` files (which
+    carry `image.fullRef` + `annotations.image*`) and rebuilds the namespaceSelector
+    values file from the same files — adding an app = adding one values file, no
+    pipeline edits.
   - Without `-f values.yaml` (or `kyverno test`'s `variables:`), `namespaceSelector`
     rules are silently *Excluded* offline → `pass: 0, fail: 0` (a vacuous green).
     Verified: with `-f`, the compliant app pod passes all 14 rules; the attacker pod
