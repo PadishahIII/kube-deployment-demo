@@ -168,7 +168,6 @@ pipeline {
                 '''
 		}
             }
-        }
 
         stage('policy schema lint') {
             steps {
@@ -198,6 +197,7 @@ pipeline {
                 }
             }
         }
+}
 
     post {
         always {
