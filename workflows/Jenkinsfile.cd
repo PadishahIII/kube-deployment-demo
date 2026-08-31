@@ -82,7 +82,7 @@ pipeline {
                         # so we run the verify command directly (no script wrapper). Registry auth goes via
                         # env vars (COSIGN_REGISTRY_*), never CLI flags (which would show in the process list).
                         docker run --rm \\
-                            -v ${COSIGN_KEY_PUB}:/keys/cosign.pub \\
+                            -v "${COSIGN_KEY_PUB}:/keys/cosign.pub" \\
                             -e COSIGN_REGISTRY_USERNAME="${DOCKERHUB_CRED_USR}" \\
                             -e COSIGN_REGISTRY_PASSWORD="${DOCKERHUB_CRED_PSW}" \\
                             ghcr.io/sigstore/cosign/cosign@${COSIGN_VERSION} \\
