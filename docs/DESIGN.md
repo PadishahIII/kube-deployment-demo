@@ -1,13 +1,13 @@
 # kube-security — Design Document
 
 A single-node kind cluster that demonstrates **defense-in-depth Kubernetes security**,
-enforced by a **Jenkins pipeline** — CI gates the policies and the Helm chart, CD
-**verifies cosign-signed images** and deploys them with a **GPG-signed Helm chart** —
-while **Kyverno** enforces admission policies in-cluster.
+gated by a **Jenkins policy gate** — CI tests the Kyverno policies and every
+developer-contributed tenant manifest, then installs the policy set — while **Kyverno**
+enforces admission in-cluster. **Deployment (CD) is deliberately out of scope**: this is
+a policy-gate demo owned by the cluster operator, not an operations demo (§13).
 
 This document is the source of truth for the repo layout, the security controls, and
-the pipeline design. `SETUP_DEMO.md` covers environment setup; `README.md` covers
-usage.
+the gate design. `SETUP_DEMO.md` covers environment setup; `README.md` covers usage.
 
 ---
 
@@ -16,11 +16,13 @@ usage.
 1. **Show, don't tell.** Every security control has a *demonstrable failure mode*:
    a non-compliant pod is rejected with a readable message, an unverified image is
    blocked, a cross-tenant request is denied, an anonymous kubelet request gets a 401.
-2. **Pipeline is the only trusted path.** Images are produced by the application
-   repo's pipeline (build → trivy scan → cosign sign → push — out of scope for this
-   repo; SETUP_DEMO.md shows how to produce the demo signed images) and reach the
-   cluster only through this repo's CD pipeline (cosign verify → GPG-sign chart →
-   deploy). Anything that bypasses them is rejected at admission.
+2. **The gate is the only trusted path for policy.** Policies and tenant deployment
+   manifests live in this repo; nothing is installed in the cluster, and nothing is
+   mergeable, unless it clears the gate's checks first. Images are produced by the
+   application repo's pipeline (build → trivy scan → cosign sign → push — out of scope
+   here; SETUP_DEMO.md shows how to produce the demo signed images). Deploying is the
+   cluster operator's own concern — but whatever gets deployed, by whoever, is still
+   validated by Kyverno at admission.
 3. **Multi-tenant realism.** Two tenant namespaces with isolated RBAC, network
    policies, and service accounts — the policies apply to tenants, not to the
    platform namespaces (a realistic two-tier governance model).
@@ -32,12 +34,12 @@ usage.
 | In scope | Out of scope (see §13) |
 | --- | --- |
 | Kyverno admission policies (13) + unit tests | DAST (covered by sibling repo `devsecops-demo`) |
-| Image governance: trust list, digest pinning, cosign verify at deploy | Image build/push/scan pipeline — the application repo's job (SETUP_DEMO.md shows how to produce the demo signed images) |
-| Helm chart for CD, GPG-signed (provenance) | Service mesh / mTLS, audit logging, etcd hardening |
+| Image governance **as a gate can enforce it**: trust list, digest pinning, attestation-annotation + digest-match checks | Image build/push/scan pipeline — the application repo's job (SETUP_DEMO.md shows how to produce the demo signed images); cosign verify itself is a deploy-time concern |
+| Developer-owned Helm chart (`resources/helm/`) rendered + checked by the gate | **CD / deployment pipeline** — the cluster operator's job (§13; the demo's former `Jenkinsfile.cd` lives only in git history) |
 | Multi-tenant namespaces, RBAC, NetworkPolicies | PodSecurityAdmission labels (mentioned as alternative) |
 | External API authentication (OIDC via dex) | Node hardening beyond kind defaults (kube-bench used for evidence) |
 | Kubelet access restriction + verification | Secrets management (SOPS/SealedSecrets), GitOps (ArgoCD) |
-| Jenkins CI (policy tests, IaC scan, **policy install**) + CD (cosign verify → signed-chart deploy → verify) | Gate framework (sibling repo) — this repo hardcodes failure gates (tool exit codes) |
+| Jenkins CI = **the policy gate**: policy tests + manifest conformance + IaC scan + **policy install** | Gate framework (sibling repo) — this repo hardcodes failure gates (tool exit codes) |
 
 ## 3. Architecture
 
@@ -45,68 +47,72 @@ usage.
    app repo pipeline (OUT OF SCOPE — see SETUP_DEMO.md):
    build → trivy image scan (CRITICAL,HIGH) → cosign sign → push docker.io/padishahiii/*
 
-                    ┌─────────────────────────── Jenkins (local, :8081) ────────────────────────────┐
-                    │                                                                               │
-  git push          │  CI: workflows/Jenkinsfile.ci                CD: workflows/Jenkinsfile.cd     │
-  ┌────────┐        │  ┌─────────────────────────────┐            ┌─────────────────────────────┐   │
-  │ GitHub │──────▶ │  │ schema lint (dry-run=server)│            │ cosign verify (trust anchor)│   │
-  │  repo  │        │  │ policy unit tests           │            │ helm package + GPG sign     │   │
-  └────────┘        │  │ trivy config (helm + yaml)  │            │ helm verify (public.asc)    │   │
-                    │  │ POLICY INSTALL (kubectl     │            │ helm upgrade --install ─────┼───┼──┐
-                    │  │   apply + Ready wait)       │            │ rollout + verify            │   │  │
-                    │  └──────────────┬──────────────┘            └─────────────────────────────┘   │  │
-                    └─────────────────┼─────────────────────────────────────────────────────────────┘  │
-                                      │ policies that passed their tests                               │
-                                      │ are the only ones that reach the cluster                       │
-                                      ▼                                                                ▼
-   ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-   │  kind cluster (single node)                                                                      │
-   │                                                                                                  │
-   │  kube-apiserver : --oidc-issuer-url=http://dex.platform.svc:5556   --authorization-mode=Node,RBAC│
-   │  kubelet        : anonymous auth OFF · read-only port 0 · webhook authorization                  │
-   │                                                                                                  │
-   │  Kyverno (kyverno ns) ── 13 ClusterPolicies, Enforce, scoped to ns label tenancy.io/tenant      │
-   │        │                                                                                         │
-   │        └─ admission-validates every Pod created by ANY path (pipeline OR kubectl OR controller)  │
-   │                                                                                                  │
-   │   platform ns          tenant-a ns                 tenant-b ns                                   │
-   │   ┌───────────┐        ┌──────────────────┐        ┌──────────────────┐                          │
-   │   │ dex (OIDC)│        │ shop  :8080      │        │ analytics :9090  │                          │
-   │   │  :5556    │        │ PVC /data (logs) │        │ PVC /data        │                          │
-   │   └───────────┘        │ SA: shop         │        │ SA: analytics    │                          │
-   │                        │ NetPol deny-all  │        │ NetPol deny-all  │◀─── cross-tenant allow   │
-   │                        │  +allow-dns      │        │  +allow-dns      │     tenant-a → :9090     │
-   │                        │  +allow-same-ns  │        │  +allow-from-a   │                          │
-   │                        └──────────────────┘        └──────────────────┘                          │
-   │                                                                                                  │
-   │  rogue: resources/admission/pod.attacker.yaml (bitnami/kubectl, root, no ctx)                    │
-   │          └─▶ REJECTED at admission: image not in governed trust list (+ 8 other rules)           │
-   └──────────────────────────────────────────────────────────────────────────────────────────────────┘
+                            developer PR: policies / chart / values-<tenant>.yaml
+  git push                ┌──────────────── Jenkins (local, :8081) ────────────────────┐
+  ┌────────┐  gate        │            workflows/Jenkinsfile.ci = THE POLICY GATE       │
+  │ GitHub │─────────────▶│  ┌──────────────────────────────────────────────────────┐   │
+  │  repo  │  (PR check)  │  │ policy unit tests  : kyverno test tests/policies     │   │
+  └────────┘              │  │ policy conformance : render values-<tenant>.yaml →   │   │
+                          │  │   kyverno apply policies/ -r <rendered>  (dev's app  │   │
+                          │  │   manifests must pass all 13 policies)               │   │
+                          │  │ IaC scan           : trivy config --exit-code 1      │   │
+                          │  │ policy schema lint : kubectl apply --dry-run=server  │   │
+                          │  │ POLICY INSTALL     : kubectl apply -f policies/      │   │
+                          │  │   + wait Ready  ← only path by which policy ships    │   │
+                          │  └───────────────────────────────┬──────────────────────┘   │
+                          └──────────────────────────────────┼──────────────────────────┘
+                                                             ▼
+   ┌──────────────────────────────────────────────────────────────────────────────────┐
+   │  kind cluster (single node)                                                      │
+   │                                                                                  │
+   │  kube-apiserver : --oidc-issuer-url=http://dex.platform.svc:5556                 │
+   │                   --authorization-mode=Node,RBAC                                 │
+   │  kubelet        : anonymous auth OFF · read-only port 0 · webhook authorization  │
+   │                                                                                  │
+   │  Kyverno (kyverno ns) ── 13 ClusterPolicies, Enforce, scoped to ns label         │
+   │        │                             tenancy.io/tenant                           │
+   │        └─ admission-validates every Pod created by ANY path                      │
+   │          (the operator's CD, kubectl, a controller — the gate is not in the       │
+   │           request path; the policies it installed are)                           │
+   │                                                                                  │
+   │   platform ns          tenant-a ns                 tenant-b ns                   │
+   │   ┌───────────┐        ┌──────────────────┐        ┌──────────────────┐          │
+   │   │ dex (OIDC)│        │ shop  :8080      │        │ analytics :9090  │          │
+   │   │  :5556    │        │ PVC /data (logs) │        │ PVC /data        │          │
+   │   └───────────┘        │ SA: shop         │        │ SA: analytics    │          │
+   │                        │ NetPol deny-all  │        │ NetPol deny-all  │◀── allow │
+   │                        │  +allow-dns      │        │  +allow-dns      │   a→:9090│
+   │                        │  +allow-same-ns  │        │  +allow-from-a   │          │
+   │                        └──────────────────┘        └──────────────────┘          │
+   │                                                                                  │
+   │  rogue: resources/admission/pod.attacker.yaml (bitnami/kubectl, root, no ctx)    │
+   │          └─▶ REJECTED at admission: image not in governed trust list (+9 rules)  │
+   └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Control flow for a compliant deployment:**
+**Control flow — a policy change or a new app deployment:**
 
 1. The application repo's pipeline builds the distroless image, Trivy-scans it
    (fail on CRITICAL/HIGH), cosign-signs it, and pushes it to the governed registry
    (`docker.io/padishahiii/*`). Out of scope for this repo — SETUP_DEMO.md walks
    through exactly this for the demo apps ("Producing the demo signed images").
-2. Developer pushes a change to this repo (policies, chart, values, manifests).
-3. CI lints the Kyverno policies, runs the policy unit tests (`kyverno test`), and
-   Trivy-scans the Helm chart + manifests. Any non-zero exit fails the build.
-4. **CI installs the policies** — `kubectl apply -f policies/`. This is the policy
-   execution stage: only policies that linted clean and passed their unit tests reach
-   the cluster. (Violation paths are proven offline by `kyverno test`, so the
-   pipeline does not re-assert them in-cluster.)
-5. CD verifies the image signature with the committed cosign public key
-   (`cosign-pub` credential) — the trust anchor. Unsigned or tampered image → no deploy.
-6. CD packages the chart, GPG-signs it, verifies the signature with the committed
-   public key, and `helm upgrade --install`s it into the tenant namespace. The
-   deployment carries the attestation annotations (verified-by + digest).
-7. **Kyverno validates every Pod at admission** — the annotations, image digest,
-   and security contexts must satisfy all 13 policies or the Pod is rejected.
-8. Post-deploy verification (in-cluster, positive only): rollout status, PolicyReports
-   for the deployed workloads, NetworkPolicy behavior, RBAC `can-i` matrix, kubelet
-   anonymous-access check.
+2. A developer opens a PR against this repo: policies, chart, `values-<tenant>.yaml`
+   (carrying their digest-pinned image + attestation annotations), or plain manifests.
+3. **The gate runs** (`Jenkinsfile.ci`): policy unit tests, conformance (render the
+   developer's chart values and apply every policy to the result), the Trivy IaC scan,
+   and the server-side schema lint. Any non-zero exit blocks the merge.
+4. **The gate installs the policies** — `kubectl apply -f policies/` + wait for
+   `Ready`. This is the policy execution stage: only policies that linted clean and
+   passed their tests reach the cluster. Violation paths are proven offline by
+   `kyverno test`, not re-asserted in-cluster.
+5. The cluster operator — **outside this demo** — deploys the gate-passed manifests
+   with whatever tooling they run, verifying the image signature at deploy time.
+6. **Kyverno validates every Pod at admission** — the attestation annotations, image
+   digest, and security contexts must satisfy all 13 policies or the Pod is rejected,
+   no matter who applied it.
+7. Operator-side evidence (`tests/verify.sh`, positive-only, run once workloads
+   exist): PolicyReports, RBAC `can-i` matrix, kubelet anonymous-access check,
+   NetworkPolicy behaviour.
 
 ## 4. Multi-tenant model
 
@@ -125,9 +131,9 @@ usage.
   - `bob` — OIDC user, group `tenant-b`.
   - App workloads run under per-app ServiceAccounts (`shop`, `analytics`) with
     **zero API permissions** and `automountServiceAccountToken: false`.
-  - The CD pipeline authenticates with the kind admin kubeconfig (the "platform
-    operator" identity). In a real org this would be a dedicated CD ServiceAccount
-    with a minimal per-tenant Role — noted in the README.
+  - The **gate** authenticates with the kind admin kubeconfig (the "cluster operator"
+    identity) — its only cluster-touching step is installing the policies it just
+    tested. Deployment identities belong to the operator's own CD, out of scope here.
 - **RBAC (least privilege, no cluster-admin for humans):**
   - `alice` → Role `tenant-a-pods` (create/delete/get/list on `pods`) +
     ClusterRole `view` in `tenant-a` only. She can create pods, but only
@@ -153,12 +159,12 @@ usage.
 | P9 | No SA credentials if API not needed | Kyverno: `automountServiceAccountToken: false` | `policies/require-automount-sa-token-false.yaml` |
 | P10 | No privileged containers (defense in depth) | Kyverno: `privileged: false` | `policies/disallow-privileged-containers.yaml` |
 | C1 | Governed images only (trust list) | Kyverno: image repo must match trust list | `policies/require-image-allowlist.yaml` |
-| C2 | Only scanned images admitted (Trivy) | App pipeline: trivy scan before cosign sign (SETUP_DEMO). CD: cosign verify → attestation annotations. Kyverno: annotation + digest-match | `policies/require-image-attestation.yaml`, `policies/require-image-digest.yaml`, CD pipeline |
+| C2 | Only scanned/verified images admitted | App pipeline: trivy scan before cosign sign (SETUP_DEMO). Operator verifies the signature at deploy time and stamps the annotations. Gate + Kyverno: annotation present + attested digest == running digest | `policies/require-image-attestation.yaml`, `policies/require-image-digest.yaml`, gate conformance stage |
 | K1 | External API authentication | kube-apiserver OIDC → dex (static users, groups) | `kind/cluster-config.yaml`, `resources/cluster/dex.yaml` |
 | K2 | Use RBAC properly | Per-tenant Roles/RoleBindings, no cluster-admin, app SAs have zero perms | `resources/cluster/rbac.yaml` |
 | K3 | Limit access to kubelets | anonymous auth off, read-only port 0, webhook authz; verified with kube-bench + negative curl | `kind/cluster-config.yaml`, `tests/verify.sh` |
 | N1 | Network policies (prod-like) | default-deny + explicit allows per tenant | chart `templates/networkpolicy-*.yaml` |
-| S1 | Helm chart for CD, signed | one chart, GPG provenance sign + verify before deploy | `resources/helm/webapp/`, CD pipeline |
+| S1 | Developer-owned deployment definitions, checked before merge | one chart; the gate renders each tenant values file and runs all 13 policies against the render | `resources/helm/webapp/`, gate conformance stage |
 
 ## 6. Kyverno policies
 
@@ -277,10 +283,10 @@ metadata:
     policies.kyverno.io/category: Supply Chain
     policies.kyverno.io/severity: high
     policies.kyverno.io/description: >-
-      Only images that passed the platform verification may run. The CD pipeline
-      cosign-verifies the image and stamps the pod template with attestation
-      annotations; this policy enforces their presence and that the attested
-      digest matches the image actually being run.
+      Only cosign-verified images may run; the attested digest must match the image
+      digest. The deploy step (cluster operator) cosign-verifies the image and stamps
+      the pod template with attestation annotations; this policy enforces their
+      presence and that the attested digest matches the image actually being run.
 spec:
   validationFailureAction: Enforce
   background: true
@@ -295,7 +301,7 @@ spec:
       validate:
         message: >-
           Pod is missing the image attestation (security.devsecops.io/image-verified=cosign).
-          Only images verified by the CD pipeline may run.
+          Only images verified by the cluster operator's deployment pipeline may run.
         pattern:
           metadata:
             annotations:
@@ -310,7 +316,7 @@ spec:
       validate:
         message: >-
           The attested image digest does not match the image digest. The image was
-          likely re-tagged or replaced after verification — re-run the pipeline.
+          likely re-tagged or replaced after verification — re-verify and re-deploy.
         cel:
           expressions:
           - expression: >
@@ -415,10 +421,14 @@ Verification (in `tests/verify.sh`):
 
 ### 8.2 Verified images (C2) — cosign as the trust anchor
 
-Division of labor: **the application repo's pipeline owns build + scan + sign**
-(out of scope for this repo — SETUP_DEMO.md shows how to produce the demo signed
-images). **This repo's CD owns verify + deploy.** The cosign signature is the trust
-anchor: an image is only signed after a passing Trivy scan, so *verified ⇒ scanned*.
+Division of labor: **the application repo's pipeline owns build + scan + sign** (out of
+scope for this repo — SETUP_DEMO.md shows how to produce the demo signed images).
+**The cluster operator owns verify + deploy** — also out of scope for this repo, which
+is why there is no `cosign verify` step here. What this repo *does* own is the
+admission-time contract that makes a skipped verification visible. The cosign signature
+is the trust anchor: an image is only signed after a passing Trivy scan, so *verified ⇒
+scanned*, and the annotation pair below is the in-cluster proof that verification
+happened.
 
 ```
 app repo pipeline (out of scope — SETUP_DEMO.md)
@@ -426,48 +436,55 @@ app repo pipeline (out of scope — SETUP_DEMO.md)
 build (distroless) → trivy image scan (fail on CRITICAL/HIGH)
   → cosign sign --key <private key> → push to docker.io/padishahiii/*
 
-this repo's CD
-──────────────
-cosign verify --key cosign-pub IMAGE@sha256:...     (fail = no deploy)
-  → write rendered/values-image.yaml:
-      image: docker.io/padishahiii/kube-sec-shop@sha256:...
-      attestation.verifiedBy: cosign
-      attestation.digest: sha256:...
-  → helm template → pod template annotations:
+operator deploy step (out of scope — this repo's gate stops at the contract)
+───────────────────────────────────────────────────────────────────────────
+cosign verify --key <cosign.pub> IMAGE@sha256:...      (fail = no deploy)
+  → stamp the pod template:
       security.devsecops.io/image-verified: cosign
-      security.devsecops.io/image-digest: sha256:...
-  → helm upgrade --install ───────────▶ Kyverno require-image-attestation
+      security.devsecops.io/image-digest:   sha256:...
+  → helm upgrade / kubectl apply ─────▶ Kyverno require-image-attestation
                                         (annotation present AND digest == image digest)
+
+this repo's gate (IN SCOPE)
+──────────────────────────
+renders resources/helm/webapp/values-<tenant>.yaml (developer-owned: fullRef +
+annotations.image*) → kyverno apply policies/ -r <rendered>
+  → enforces the same shape offline: digest-pinned reference, annotation present,
+    attested digest == fullRef digest. A manifest that fails cannot merge.
 ```
 
-- **Digest pinning** (`require-image-digest`): the CD `IMAGE` parameter is a full
-  `repo@sha256:...` reference — never a mutable tag.
+- **Digest pinning** (`require-image-digest`): every image reference must be a full
+  `repo@sha256:...` reference — never a mutable tag. The gate checks this in the
+  developer's rendered manifest; admission checks it on every Pod.
 - **Digest match check** closes the re-tagging hole: if the registry image is
   re-tagged after verification, the attested digest no longer matches and admission
   fails.
-- **Honest limitation:** the attestation annotations are mutable by anyone with
-  update rights on the pod template. Mitigations in this design: (a) RBAC — only
-  the platform operator (CD) updates tenant Deployments; (b) the digest-match check;
-  (c) CD cosign-verifies the image *before* stamping, so a valid annotation implies
-  a verified signature. The stronger production variant is cosign verification at
-  admission itself (out of scope here).
-### 8.3 Helm chart for CD (S1) — signed
+- **Honest limitation:** the attestation annotations are mutable by anyone with update
+  rights on the pod template. Mitigations in this design: (a) RBAC — tenant Deployments
+  are updated only by the operator; (b) the digest-match check; (c) the operator
+  cosign-verifies *before* stamping, so a valid annotation implies a verified
+  signature. The stronger production variant is cosign verification at admission itself
+  (out of scope here). Note the gate **cannot** cosign-verify — that needs registry
+  credentials and network at check time; it enforces the contract's shape, Kyverno
+  enforces its presence.
 
-One chart, `resources/helm/webapp/`, deployed as two releases (`shop` in tenant-a,
-`analytics` in tenant-b). Pattern borrowed from `../devsecops-demo/Jenkinsfile.cd`:
+### 8.3 The Helm chart (S1) — developer-owned input the gate checks
 
-- `helm package --sign --key <identity> --keyring <dearmored private key>` →
-  `webapp-<ver>.tgz` + `.prov`.
-- **Verify with the committed public key only** (`keys/public.asc`) before any
-  deploy: `helm verify webapp-<ver>.tgz --keyring <pubring>`.
-- The signed `.tgz` is the deploy artifact; `helm upgrade --install` is idempotent
-  with `--create-namespace`, followed by bounded `kubectl rollout status`.
-- Key management: the Jenkins `helm-signing-key` credential is shared with the
-  sibling `devsecops-demo` repo (`deploy/helm/keys/helm-signing-key.asc`,
-  ed25519 `devsecops-demo <devsecops-demo@localhost>`); `public.asc` here is
-  the public half of that same key, exported from the credential file (see
-  SETUP_DEMO.md §5.2). Helm 4 signs with its built-in Go openpgp — the
-  pipeline dearmors first (same gotcha as the sibling project).
+One chart, `resources/helm/webapp/`, rendered once per tenant values file (`shop` in
+tenant-a, `analytics` in tenant-b). Developers own `values-<tenant>.yaml`; the operator
+owns the policy set. The gate is where those two meet:
+
+- The **conformance stage** runs `helm template` per tenant, stamps the namespace
+  (`kubectl create --dry-run=client`), and applies all 13 policies to the render. If a
+  values change — a new image, a dropped capability, a missing annotation — breaks
+  policy, the build goes red before anything merges.
+- **No signing here.** Chart provenance (GPG `helm package --sign` + `helm verify`) is
+  a *delivery* concern of the operator's CD, not a policy concern; it lived in the
+  removed `Jenkinsfile.cd` (git history). What the gate checks instead is the manifest
+  content itself — which is strictly the property that matters for "may this run?".
+- The archived `reports/conformance-rendered/*.yaml` are the exact bytes that cleared
+  the gate — a convenient handoff for the operator's deploy step, though nothing in
+  this repo consumes them.
 
 **Chart contents (templates/):** `serviceaccount.yaml`, `deployment.yaml` (security
 context: non-root, runAsUser 1000, fsGroup 1000, readOnlyRootFilesystem, drop ALL,
@@ -481,8 +498,8 @@ rules from values), `role.yaml` (empty/minimal placeholder — app SAs get no pe
 **Per-tenant values** (`values-tenant-a.yaml`, `values-tenant-b.yaml`): name, port,
 PVC size, ingress-allow peers (tenant-b allows from tenant-a), and the developer-owned
 image + attestation (digest-pinned `image.fullRef` + `annotations.imageVerified/
-imageDigest` — the same shape CD stamps per build in `rendered/values-image.yaml`,
-see §8.2). CI renders these files as-is; no app data lives in the pipeline.
+imageDigest` — the same shape the operator stamps per deploy, see §8.2). The gate
+renders these files as-is; no app data lives in the pipeline.
 
 ## 9. Demo applications
 
@@ -493,7 +510,8 @@ see §8.2). CI renders these files as-is; no app data lives in the pipeline.
 | `attacker` (pod) | tenant-b | `bitnami/kubectl:latest` | — | — | **Rogue artifact** (`resources/admission/pod.attacker.yaml`): not in trust list, runs as root, no security context → rejected by multiple policies. The demo's villain. |
 
 - The app source lives in `demo-apps/` (top-level) — it is used to **produce** the
-  signed demo images (SETUP_DEMO.md); the pipeline deploys images, not code.
+  signed demo images (SETUP_DEMO.md). Nothing in this repo deploys anything; the gate
+  checks the manifests that reference those image digests.
 **Dockerfile (`demo-apps/shop/Dockerfile`, representative):**
 
 ```dockerfile
@@ -511,20 +529,23 @@ CMD ["node", "/app/server.js"]
   makes the local-path volume group-writable for uid 1000).
 - `demo-apps/analytics/server.js`: same shape, `/metrics`-style JSON endpoint on 9090.
 
-## 10. Jenkins pipelines
+## 10. Jenkins — the policy gate
 
 Jenkins runs locally (`java -jar jenkins.war --httpPort=8081`, same as the sibling
-project). Two **Pipeline** jobs with SCM script paths: `workflows/Jenkinsfile.ci`
-and `workflows/Jenkinsfile.cd`. (Multibranch + GitHub App is the sibling project's
-setup and works here too, but is not required.)
+project). **One** Pipeline job with SCM script path `workflows/Jenkinsfile.ci`.
+(Multibranch + GitHub App is the sibling project's setup and works here too, but is
+not required.)
 
-**Credentials:** `dockerhub` (Username/Password), `cosign-pub` (Secret file — same
-credential ID as the sibling repo), `kind-kubeconfig` (Secret file — used by CI's
-policy install stage and by CD for deploys), `helm-signing-key` (Secret file).
-**Plugins:** Pipeline Aggregator, Docker Pipeline, Credentials Binding, Workspace
-Cleanup, Timestamper, Git.
+**Credentials:** `kind-kubeconfig` (Secret file) — used by the schema-lint and policy
+install stages. That is the whole list: the gate pulls no images, verifies no
+signatures, and deploys nothing.
+**Plugins:** Pipeline Aggregator, Credentials Binding, Workspace Cleanup, Timestamper,
+Git.
 
-### 10.1 CI — `workflows/Jenkinsfile.ci`
+CD (`workflows/Jenkinsfile.cd`) was removed from this repo — it is out of scope for a
+policy-gate demo (§13). What existed lives in git history.
+
+### 10.1 Stages
 
 ```
 cleanup → checkout
@@ -538,13 +559,17 @@ cleanup → checkout
   → policy schema lint : kubectl apply --dry-run=server -f policies/   (kind-kubeconfig; CRD strict-decode)
   → policy install     : kubectl apply -f policies/            (kind-kubeconfig credential)
   → policy ready       : kubectl wait --for=condition=Ready clusterpolicy --all --timeout=120s
-post: archive reports/kyverno-test.txt, kyverno-conformance.txt, trivy-config.txt
+post: archive reports/kyverno-test.txt, kyverno-conformance.txt, trivy-config.txt,
+      conformance-rendered/ (the per-tenant manifests that passed — the operator's
+      deploy input)
+```
 
 Offline checks (unit tests, conformance, IaC) run **first** — they need no cluster and
 catch most issues. The cluster checks (lint → install → ready) run last, so a downed
 cluster cannot prevent the offline signal from being produced.
 
 Two tooling notes (verified):
+
 - **No `kyverno/kyverno` CLI docker image exists** (the controller image is not the CLI).
   CI bootstraps the version-pinned binary from the GitHub release (`kyverno-cli_v<ver>_<os>_<arch>.tar.gz`),
   reusing a matching local install to avoid the ~52MB download.
@@ -555,8 +580,8 @@ Two tooling notes (verified):
 The last two stages are the **policy execution stage** — the only path by which
 policies enter the cluster:
 
-- `policy install` runs **only after** lint + unit tests + IaC scan pass (declarative
-  pipeline semantics: a non-zero exit in any earlier stage aborts the build).
+- `policy install` runs **only after** lint + unit tests + conformance + IaC scan pass
+  (declarative pipeline semantics: a non-zero exit in any earlier stage aborts the build).
 - `kubectl apply --dry-run=server` runs the real CRD structural schema (catches
   unknown fields / bad shapes) without creating anything. It does **not** compile
   CEL — that is the job of the unit-test stage.
@@ -567,18 +592,18 @@ policies enter the cluster:
     denied) and is the CEL compile-error net. The attacker pod is a `result: fail`
     fixture here (an *expected* denial).
   - `kyverno apply policies/ -r <rendered>/ -f <rendered>/values.yaml` — **conformance**
-    (the official dry-run). Proves the *actual* app resources pass all 13; exit 0.
+    (the official dry-run). Proves the *actual* developer manifests pass all 13; exit 0.
     The app manifests are **rendered from the webapp chart at CI time** (helm
     template → `kubectl create --dry-run=client` namespace stamp), not stored as
-    hand-written fixtures — the chart is the single source of truth CD deploys, so
-    a security-context change to the chart flips conformance in the same commit
-    instead of drifting in a stale copy under tests/. Deployments are autogen-
-    expanded to Pods, mirroring the real admission path; per-tenant renders land in
-    `reports/conformance-rendered/` (gitignored). CI is app-agnostic: it iterates
-    the developer-owned `resources/helm/webapp/values-<tenant>.yaml` files (which
-    carry `image.fullRef` + `annotations.image*`) and rebuilds the namespaceSelector
-    values file from the same files — adding an app = adding one values file, no
-    pipeline edits.
+    hand-written fixtures — the chart is the single source of truth developers
+    contribute, so a security-context change to the chart or a values file flips
+    conformance in the same commit instead of drifting in a stale copy under tests/.
+    Deployments are autogen-expanded to Pods, mirroring the real admission path;
+    per-tenant renders land in `reports/conformance-rendered/` (under the gitignored
+    `reports/`, archived as build artifacts). CI is app-agnostic: it iterates the developer-owned
+    `resources/helm/webapp/values-<tenant>.yaml` files (which carry `image.fullRef` +
+    `annotations.image*`) and rebuilds the namespaceSelector values file from the same
+    files — adding an app = adding one values file, no pipeline edits.
   - Without `-f values.yaml` (or `kyverno test`'s `variables:`), `namespaceSelector`
     rules are silently *Excluded* offline → `pass: 0, fail: 0` (a vacuous green).
     Verified: with `-f`, the compliant app pod passes all 14 rules; the attacker pod
@@ -620,37 +645,30 @@ policies enter the cluster:
   policy governance from app CI. Kept in CI here because policies and their tests
   live in one tree and change together.
 
-### 10.2 CD — `workflows/Jenkinsfile.cd`
+### 10.2 Why there is no CD section
 
-Parameters: `TENANT` (`tenant-a`|`tenant-b`), `IMAGE` (full digest-pinned reference,
-default per tenant, e.g. `docker.io/padishahiii/kube-sec-shop@sha256:...`),
-`APP_VERSION` (chart/app version label, default `1.0.0`).
+An earlier revision of this repo carried `workflows/Jenkinsfile.cd`: cosign-verify a
+digest-pinned `IMAGE` against the `cosign-pub` credential, stamp the attestation
+annotations into per-build values, `helm package --sign` the chart (GPG provenance,
+verified with the committed `public.asc`), `helm upgrade --install` into the tenant
+namespace, then collect in-cluster evidence. It was removed because **deploying is
+operations, and this repo demonstrates a policy gate** — every mechanism CD exercised
+(cosign verify, chart signing, rollout checks) proves things this demo does not need to
+prove, and it blurred the ownership story (the operator owns deployment; this repo owns
+policy + the gate). The interesting invariants survive without it:
 
-```
-cleanup → checkout → Initialize (param validation: IMAGE must be a @sha256: reference)
-  → verify image     : cosign verify --key <cosign-pub credential> IMAGE
-                         (registry auth via dockerhub credential; fail = no deploy)
-  → write image values: rendered/values-image.yaml (image ref + attestation annotations), chmod 600
-  → package & sign chart: helm package --sign (helm-signing-key credential)
-  → verify signature   : helm verify with committed keys/public.asc ONLY
-  → deploy             : helm upgrade --install <app> web-<ver>.tgz -n <TENANT>
-                         -f values-<TENANT>.yaml -f rendered/values-image.yaml
-                         → kubectl rollout status (bounded 5m)
-  → verify             : PolicyReports, netpol behavior, RBAC can-i, kubelet check
-                         (subset of tests/verify.sh)
-post: archive verification evidence, chart .tgz/.prov
-```
+- "An unverified image never runs" is still enforced — by the operator's deploy-time
+  verify plus `require-image-attestation` at admission.
+- "A non-compliant manifest never merges" is still enforced — harder, actually: the
+  gate checks the developer's real render *before* merge, which CD used to discover
+  only at deploy time.
+- "The pipeline is the only trusted path" became "**the policies are the only trusted
+  boundary**" — admission validates every Pod from every path, including (and
+  especially) ones the operator did not automate.
 
-**IMAGE parameter (digest-pinned):** CD never builds, pushes, or scans images — the
-image already exists in the governed registry with a cosign signature (produced per
-SETUP_DEMO.md). `IMAGE` is validated to be a `@sha256:` reference, so mutable tags
-cannot be deployed.
-
-**Why no in-cluster negative test:** CD asserts only that the compliant path works.
-Rejection behaviour (attacker pod, unattested image) is proven offline by
-`kyverno test`; duplicating it in the pipeline would add a mutable-resource
-apply/cleanup cycle to the deploy job. The rejection is still demonstrated **live
-and manually** in the demo script (§14) with `resources/admission/pod.attacker.yaml`,
+The `helm-signing-key` / `cosign-pub` / `dockerhub` Jenkins credentials and
+`tools/generate-helm-signing-key.sh` were removed with it; SETUP_DEMO.md §8-§9 list
+what a stale Jenkins instance must clean up.
 
 ## 11. Tests
 
@@ -664,21 +682,28 @@ tests/
 │   │   └── pod-root.yaml          # expected: fail (also the guard: a broken selector can't satisfy "fail")
 │   ├── disallow-privilege-escalation/ ...   (one dir per policy: ≥1 pass + ≥1 fail fixture)
 │   └── ...
-└── verify.sh                      # end-to-end cluster verification
+└── verify.sh                      # operator-side cluster evidence collector
 ```
 
 - **Unit (offline):** `kyverno test tests/policies` — every policy has at least one
   compliant fixture (`result: pass`) and one violating fixture (`result: fail`).
-  Runs in CI; no cluster needed.
+  Runs in the gate; no cluster needed.
+- **Conformance (offline):** the gate renders each developer-owned
+  `resources/helm/webapp/values-<tenant>.yaml` and applies the whole policy set to the
+  render (§10.1) — the real manifests, not fixtures.
 - **Admission behaviour (offline):** `kyverno test` is where denials are asserted —
   one dir per policy, ≥1 pass + ≥1 fail fixture. No in-cluster negative tests.
-- **`verify.sh` (evidence collector, positive-only):**
+- **`verify.sh` (operator evidence, positive-only):**
   1. all 13 ClusterPolicies installed, `Enforce`, and `Ready=True`;
   2. both apps Running; PolicyReports in the tenant namespaces show **0 fail**;
   3. RBAC matrix via alice/bob oidc kubeconfigs (can-i table);
   4. kubelet anonymous curl → 401/403; kube-bench node output archived;
   5. netpol: `shop` pod → `analytics:9090` succeeds (explicit allow),
      `shop` pod → external host fails (default-deny egress).
+
+  Items 2 and 5 need deployed workloads — this repo no longer deploys anything, so on
+  a gate-only cluster those sections report/skip accordingly (1, 3, 4 pass on their
+  own). Run the full script after the operator's tooling has deployed the apps.
 
 ## 12. Directory layout
 
@@ -692,7 +717,7 @@ kube-security/
 │   └── cluster-config.yaml      # kind config: OIDC args, kubelet hardening
 ├── policies/                    # 13 Kyverno ClusterPolicies (one file per rule)
 ├── demo-apps/                   # demo app source — for PRODUCING the signed images
-│   ├── shop/                    #   (SETUP_DEMO.md); the pipeline deploys images, not code
+│   ├── shop/                    #   (SETUP_DEMO.md); nothing here deploys images
 │   │   └── Dockerfile + server.js (nodejs distroless web server, :8080)
 │   └── analytics/               #   Dockerfile + server.js (:9090)
 ├── resources/
@@ -701,29 +726,31 @@ kube-security/
 │   │   ├── dex.yaml             # platform ns + dex deployment/service
 │   │   └── rbac.yaml            # demo user roles & bindings
 │   ├── helm/
-│   │   └── webapp/              # the CD chart
+│   │   └── webapp/              # the developer-owned chart the gate renders+checks
 │   │       ├── Chart.yaml
 │   │       ├── values.yaml
-│   │       ├── values-tenant-a.yaml
-│   │       ├── values-tenant-b.yaml
-│   │       ├── keys/public.asc  # committed GPG public key
+│   │       ├── values-tenant-a.yaml   # per-tenant: image fullRef + attestation
+│   │       ├── values-tenant-b.yaml   #   annotations + port + peers (developer-owned)
 │   │       └── templates/       # sa, deployment, service, pvc, netpols, role
 │   └── admission/
-│   └── pod.attacker.yaml    # rogue pod — manual demo rejection target
+│       └── pod.attacker.yaml    # rogue pod — manual demo rejection target
 ├── tests/
 │   ├── policies/<policy>/       # kyverno-test.yaml + fixtures per policy
-│   └── verify.sh
-├── workflows/
-│   ├── Jenkinsfile.ci
-│   └── Jenkinsfile.cd
-└── tools/
-    └── generate-helm-signing-key.sh
+│   └── verify.sh                # operator-side cluster evidence (post-deploy)
+└── workflows/
+    └── Jenkinsfile.ci           # THE POLICY GATE (the only pipeline in this repo)
 ```
+
+(Removed with CD: `workflows/Jenkinsfile.cd`, `resources/helm/webapp/keys/public.asc`,
+`tools/generate-helm-signing-key.sh`.)
 
 ## 13. Out of scope (and why)
 
 | Item | Reason / where it lives |
 | --- | --- |
+| **CD / deployment pipeline** | This is a policy-gate demo, not an operations demo. The gate decides what *may* run and installs the enforcing policies; running it is the cluster operator's job. The previous `Jenkinsfile.cd` (cosign verify → GPG-signed chart → deploy → rollout checks) is preserved in git history — §10.2 explains what its removal does and does not weaken. |
+| Chart provenance signing (GPG `helm package --sign` / `helm verify`) | A delivery-integrity concern of the operator's CD, not a policy property of the manifest. Removed with CD. |
+| cosign verify at check time | The gate has no registry credentials/network by design; it enforces the manifest *shape* (digest pinning, attestation annotations + digest match) and Kyverno enforces it at admission. |
 | DAST (ZAP) | Sibling repo `devsecops-demo` already demonstrates in-cluster DAST + DAST-aware gate. |
 | Image build/push/scan pipeline | The application repo's job. SETUP_DEMO.md walks through producing the demo signed images (build → trivy → cosign sign → push). cosign *signing* is demonstrated in `devsecops-demo`. |
 | PodSecurityAdmission labels | Complementary, not alternative — PSS `restricted` ≈ policies P1–P6. Mentioned in README; explicit policies chosen for per-rule granularity and readable rejection messages. |
@@ -734,21 +761,28 @@ kube-security/
 
 ## 14. Demo script (interview narrative)
 
-1. **Green CD** — run CD with `TENANT=tenant-a` + `IMAGE=...@sha256:...`: cosign
-   verify → GPG sign → deploy → rollout OK. "The pipeline is the only trusted path."
-2. **Admission denial** — `kubectl apply -f resources/admission/pod.attacker.yaml`
-   → rejected. Read the message: image not in trust list. "A pod that bypasses the
-   pipeline cannot run."
-3. **Unverified image** — hand-apply a Deployment with a compliant image but no
-   attestation annotations → rejected by `require-image-attestation`. "Verification
-   is enforced at admission, not just in the pipeline."
-4. **Multi-tenant RBAC** — log in as `alice` via `kubectl oidc-login`: read
-   tenant-a ✔, read tenant-b ✘, create a root pod → RBAC allows, Kyverno denies.
-5. **Component hardening** — kubelet anonymous curl → 401; kube-bench node output;
+1. **Green gate** — run the CI job: `kyverno test` 28/28, conformance on the rendered
+   tenant manifests, IaC scan clean, 13 policies installed + Ready. "Policy is code,
+   and the gate is the only path policy takes into the cluster."
+2. **Red gate (the negative control, zero cluster impact)** — point a tenant values
+   file at `bitnami/kubectl:latest` (mutable tag, off-list) or drop the attestation
+   annotations; the conformance stage fails and the PR cannot merge. "A non-compliant
+   deployment is rejected *before* it reaches anybody's cluster."
+3. **Admission denial, live** — `kubectl apply -f resources/admission/pod.attacker.yaml`
+   → rejected by ~10 policies. Read the message: image not in trust list. "And if
+   someone skips the gate entirely, admission still says no."
+4. **Unverified image** — hand-apply a Deployment with a compliant image but no
+   attestation annotations → rejected by `require-image-attestation`. "The
+   cosign-verify contract is enforced at admission, even without a pipeline in the
+   request path."
+5. **Multi-tenant RBAC** — log in as `alice` via `kubectl oidc-login`: read tenant-a ✔,
+   read tenant-b ✘, create a root pod → RBAC allows, Kyverno denies.
+6. **Component hardening** — kubelet anonymous curl → 401; kube-bench node output;
    "external auth: the apiserver validates tokens against dex, and RBAC scopes what
    each identity can do."
-6. **Network isolation** — from the shop pod: `curl analytics.tenant-b.svc:9090`
-   ✔ (explicit allow), `curl <external>` ✘ (default-deny egress).
+7. **Network isolation** (needs the operator's deployed apps) — from the shop pod:
+   `curl analytics.tenant-b.svc:9090` ✔ (explicit allow), `curl <external>` ✘
+   (default-deny egress).
 
 ## 15. Key design decisions & trade-offs
 
@@ -758,20 +792,23 @@ kube-security/
 | One policy per rule (13) | Each user requirement maps 1:1 to a file + test dir; readable rejection messages per rule | More files; PSS labels would be one label (but opaque messages, no per-rule granularity) |
 | `Enforce` in tenant ns, platform ns excluded | Two-tier governance is realistic; platform tooling (dex, kyverno) isn't PSA-restricted | Platform tier needs its own controls (out of scope) |
 | Trust list in policy `variables` | Offline-testable, versioned, reviewed | Not hot-updatable without policy redeploy (ConfigMap+apiCall is the prod variant) |
-| Annotation-based attestation (stamped after cosign verify) | Simple, no extra infrastructure; CD verifies before stamping; digest-match check closes re-tagging | Annotations are mutable — mitigated by RBAC + digest check; cosign-at-admission is the stronger variant |
+| Gate renders the developer chart instead of storing fixtures | The values file is the single source of truth; a change to it flips conformance in the same commit | Conformance needs `helm` + a namespace-stamp trick (§10.1) |
+| **No CD pipeline in this repo** | It's a policy-gate demo; deployment is the operator's domain. CD's supply-chain story (cosign verify, chart signing) either stays a deploy-time concern or is re-enforced at admission — nothing policy-relevant is lost | The end-to-end "verified image actually running" loop isn't demonstrated in-repo; §10.2 lists what survives; git history keeps the old CD |
+| Annotation-based attestation (stamped by the operator after cosign verify) | Simple, no extra infrastructure; digest-match check closes re-tagging; the gate checks the shape pre-merge | Annotations are mutable — mitigated by RBAC + digest check; cosign-at-admission is the stronger variant |
 | dex over HTTP in-cluster | Minimal moving parts for the lab | No TLS — documented; production would use LB + `--oidc-ca-file` |
-| kind admin kubeconfig for CD | Simplest platform-operator identity | Real org: dedicated CD ServiceAccount + minimal per-tenant Role (noted in README) |
-| cosign signature as image trust anchor | Scan happens in the app pipeline before signing (verified ⇒ scanned); CD verifies with the committed public key (`cosign-pub`) | No in-cluster signature check — attestation annotations + digest match are the admission-time proxy |
-| Hardcoded exit-code gates (no gate framework) | Scenario is simple: each tool (kyverno test, trivy, cosign verify, helm verify) has a binary verdict | No cross-tool findings normalization/reporting (sibling repo has it) |
-| Policies installed by **CI** (the policy execution stage) | Policies + tests live in one tree and change together; the test gate is the precondition for install | CI holds cluster credentials for two purposes (test + install); a dedicated policy job or ArgoCD would isolate that better |
-| No in-cluster negative admission test | `kyverno test` already proves each rule's pass/fail behaviour offline; keeps CD deploy-only | A policy that installs but misbehaves in-cluster surfaces via PolicyReports, not a synthetic denial |
+| kind admin kubeconfig for the gate | Simplest cluster-operator identity; the gate's only writes are ClusterPolicy objects | Real org: dedicated gate ServiceAccount with `kyverno.io`-only permissions (noted in README) |
+| cosign signature as image trust anchor | Scan happens in the app pipeline before signing (verified ⇒ scanned); the operator verifies with the public key at deploy time | No in-cluster signature check — attestation annotations + digest match are the admission-time proxy |
+| Hardcoded exit-code gates (no gate framework) | Scenario is simple: each tool (kyverno test, kyverno apply, trivy, kubectl) has a binary verdict | No cross-tool findings normalization/reporting (sibling repo has it) |
+| Policies installed by **the gate** (the policy execution stage) | Policies + tests live in one tree and change together; the test gate is the precondition for install | CI holds cluster credentials for two purposes (test + install); a dedicated policy job or ArgoCD would isolate that better |
+| No in-cluster negative admission test | `kyverno test` already proves each rule's pass/fail behaviour offline; the gate never needs workloads running | A policy that installs but misbehaves in-cluster surfaces via PolicyReports, not a synthetic denial |
 
 ## 16. References
 
 - Kyverno policies & CLI: `kyverno.io/docs` (ClusterPolicy, `kyverno test`, CEL validation)
 - CIS Kubernetes Benchmark (kube-apiserver 1.2.x OIDC, kubelet 4.1.x)
 - Pod Security Standards (baseline/restricted) — the policies P1–P6 mirror `restricted`
-- Sibling repo `../devsecops-demo`: `Jenkinsfile.cd` (GPG chart signing + cosign
-  sign/verify patterns, fail-closed gate), `SETUP_DEMO.md` (Jenkins/kind conventions)
+- Sibling repo `../devsecops-demo`: `Jenkinsfile.cd` (cosign sign/verify + GPG chart
+  signing patterns, fail-closed gate) — the reference for what this repo *used* to do
+  before CD was cut from scope
 - cosign / sigstore: `github.com/sigstore/cosign` (key-based signature verification)
 - distroless: `gcr.io/distroless/nodejs22` (GoogleContainerTools/distroless)

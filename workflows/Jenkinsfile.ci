@@ -72,7 +72,7 @@ pipeline {
                     .tools/kyverno version
 
                     # Helm: renders the webapp chart for the conformance stage (the app
-                    # manifests it produces are the same source of truth CD deploys).
+                    # manifests developers contribute are checked exactly as written).
                     # No version reuse shortcut — a pinned binary is a ~25MB download.
                     if [ -x ".tools/helm" ] && .tools/helm version --short 2>/dev/null | grep -q "v${HELM_VERSION}"; then
                         echo "helm ${HELM_VERSION} already in .tools/"
@@ -112,9 +112,9 @@ pipeline {
             steps {
                 // Conformance (the official dry-run): the ACTUAL app must pass all policies.
                 // The app manifests are NOT hand-maintained fixtures — they are rendered
-                // from the webapp chart (the same source of truth CD deploys), so a security-
-                // context change to the chart flips conformance in the same commit instead of
-                // drifting into a stale second copy under tests/.
+                // from the webapp chart (the same manifests a deploy would use), so a
+                // security-context change to the chart flips conformance in the same commit
+                // instead of drifting into a stale second copy under tests/.
                 // Each values-<tenant>.yaml under resources/helm/webapp/ is rendered as-is
                 // (image.fullRef + annotations.image* live there, not in this pipeline).
                 // `helm template` does not stamp metadata.namespace, and namespaceSelector-
@@ -130,7 +130,7 @@ pipeline {
                     # developer-owned tenant values files under resources/helm/webapp/. CI
                     # discovers each values-<tenant>.yaml and renders it as-is. The release
                     # name is read from the file's own nameOverride (the same single source
-                    # CD uses), and the namespace is the tenant in the file name.
+                    # the chart itself uses), and the namespace is the tenant in the file name.
                     # Image refs + attestation annotations (image.fullRef, annotations.image*)
                     # live in those files, not in this pipeline.
                     for f in resources/helm/webapp/values-tenant-*.yaml; do

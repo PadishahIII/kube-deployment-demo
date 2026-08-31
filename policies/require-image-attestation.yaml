@@ -21,7 +21,7 @@ spec:
             matchLabels:
               tenancy.io/tenant: "true"
     validate:
-      message: "Pod is missing the image attestation (security.devsecops.io/image-verified=cosign). Only images verified by the CD pipeline may run."
+      message: "Pod is missing the image attestation (security.devsecops.io/image-verified=cosign). Only images verified by the cluster operator's deployment pipeline may run."
       pattern:
         metadata:
           annotations:
@@ -35,7 +35,7 @@ spec:
             matchLabels:
               tenancy.io/tenant: "true"
     validate:
-      message: "The attested image digest does not match the image digest. The image was likely re-tagged or replaced after verification — re-run the pipeline."
+      message: "The attested image digest does not match the image digest. The image was likely re-tagged or replaced after verification — re-verify and re-deploy."
       cel:
         expressions:
         - expression: >

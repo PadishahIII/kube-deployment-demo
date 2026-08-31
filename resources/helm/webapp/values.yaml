@@ -5,17 +5,17 @@ nameOverride: ""
 
 image:
   # Defaults only — a real deploy always provides one of:
-  #   - image.fullRef (digest-pinned, preferred; CD stamps it after cosign verify)
-  #   - image.repository + image.tag
+  #   - image.fullRef (digest-pinned, preferred; the deploy step stamps it after
+  #     cosign verify)
   # Without either, the chart refuses to render (fail-closed).
   repository: ""
   tag: ""
   fullRef: ""
   pullPolicy: IfNotPresent
 
-# Attestation annotations, stamped by the developer (tenant values) and re-stamped
-# by CD after `cosign verify` succeeds. Left empty by default so a non-CD deploy is
-# DENIED by require-image-attestation.
+# Attestation annotations, written by the developer (tenant values) and re-attested
+# by the deploy step after `cosign verify` succeeds. Left empty by default so a
+# deploy that skipped verification is DENIED by require-image-attestation.
 annotations:
   imageVerified: ""
   imageDigest: ""
