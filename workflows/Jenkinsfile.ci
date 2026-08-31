@@ -156,6 +156,7 @@ pipeline {
         }
 
         stage('IaC scan') {
+		steps {
                 // The trivy image entrypoint is already `trivy`, so the subcommand is `config`
                 // (NOT `trivy config`). --skip-dirs admission: the attacker pod is an intentional
                 // rejection target, not a deployable resource, so it is out of scan scope.
@@ -165,6 +166,7 @@ pipeline {
                         aquasec/trivy:${TRIVY_VERSION} \
                         config --severity CRITICAL,HIGH --exit-code 1 --skip-dirs admission resources/ 2>&1 | tee reports/trivy-config.txt
                 '''
+		}
             }
         }
 
