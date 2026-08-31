@@ -159,7 +159,7 @@ annotations:
             script {
                 try {
                     // Remove the per-build GPG keyrings + the sensitive image values file.
-                    sh 'rm -f rendered/secring.gpg rendered/pubring.gpg rendered/values-image.yaml'
+                    // sh 'rm -f rendered/secring.gpg rendered/pubring.gpg rendered/values-image.yaml'
                     archiveArtifacts artifacts: 'reports/verify-*.txt, reports/verify-*.json, *.tgz, *.prov',
                                       allowEmptyArchive: true, fingerprint: true
                 } catch (Exception e) {
