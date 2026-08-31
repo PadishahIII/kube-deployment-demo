@@ -85,8 +85,8 @@ pipeline {
                             -v "${COSIGN_KEY_PUB}:/keys/cosign.pub" \\
                             -e COSIGN_REGISTRY_USERNAME="${DOCKERHUB_CRED_USR}" \\
                             -e COSIGN_REGISTRY_PASSWORD="${DOCKERHUB_CRED_PSW}" \\
-                            ghcr.io/sigstore/cosign/cosign@${COSIGN_VERSION} \\
-                            verify --key /keys/cosign.pub "${IMAGE}"
+                            bitnami/cosign@${COSIGN_VERSION} \\
+                            cosign verify --key /keys/cosign.pub "${IMAGE}"
                     '''
                 }
             }
