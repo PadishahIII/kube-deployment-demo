@@ -31,7 +31,7 @@ containerPort: 8080
 
 # Pod-level security context.
 securityContext:
-  runAsNonRoot: false
+  runAsNonRoot: true
   runAsUser: 1000
   fsGroup: 1000
   seLinuxOptions:
