@@ -21,7 +21,7 @@ pipeline {
     agent any
 
     environment {
-        COSIGN_VERSION = "v2.5.0"
+        COSIGN_VERSION = "sha256:e275eeadd120e2f9c72167f2ccc4b1516ef6400980fe8e449c23293859fbb2ef"
         REGISTRY       = 'docker.io'
         DOCKERHUB_CRED = credentials('dockerhub')
         KUBECONFIG     = credentials('kind-kubeconfig')   // File credential

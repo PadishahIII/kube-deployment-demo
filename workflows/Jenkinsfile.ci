@@ -135,7 +135,7 @@ pipeline {
                     # live in those files, not in this pipeline.
                     for f in resources/helm/webapp/values-tenant-*.yaml; do
                         tenant="${f#resources/helm/webapp/values-}"; tenant="${tenant%.yaml}"
-                        release=$(sed -n 's/^nameOverride:[[:space:]]*\([^[:space:]]*\)/\1/p' "$f" | head -1)
+                        release=$(sed -n 's/^nameOverride:[[:space:]]*\\([^[:space:]]*\\)/\\1/p' "$f" | head -1)
                         [ -n "$release" ] || { echo "no nameOverride in $f"; exit 1; }
                         .tools/helm template "$release" resources/helm/webapp/ \
                             -f "$f" \
@@ -196,7 +196,6 @@ pipeline {
                 }
             }
         }
-    }
 
     post {
         always {
